@@ -1,7 +1,12 @@
 //! Reference parser — extracts [[id]] bidirectional links from markdown content.
 
 use crate::models::{ReferenceInput, ReferenceOutput};
+use once_cell::sync::Lazy;
 use regex::Regex;
+
+static REF_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"\[\[([a-zA-Z0-9_-]+)\]\]"#).unwrap()
+});
 
 /// Parser for [[id]] style references in markdown.
 pub struct ReferenceParser;
@@ -10,7 +15,7 @@ impl ReferenceParser {
     /// Extract all unique [[id]] references from content.
     /// If `current_entity_id` is provided, filters out self-references.
     pub fn extract_ids(content: &str, current_entity_id: Option<&str>) -> Vec<String> {
-        let re = Regex::new(r#"\[\[([a-zA-Z0-9_-]+)\]\]"#).unwrap();
+        let re = &*REF_RE;
 
         let mut ids: Vec<String> = re
             .captures_iter(content)

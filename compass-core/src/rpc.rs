@@ -4,6 +4,8 @@
 //! - `compute_score` — delegates to ScoringEngine
 //! - `parse_refs` — delegates to ReferenceParser
 
+use std::io::Read;
+
 use crate::models::{ReferenceInput, ScoringInput};
 use crate::scoring::ScoringEngine;
 use crate::reference::ReferenceParser;
@@ -25,10 +27,20 @@ const JSONRPC_VERSION: &str = "2.0";
 pub fn run() {
     // Read entire stdin
     let mut input = String::new();
-    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).unwrap();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        // Return parse error JSON instead of panicking
+        let err = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": { "code": -32700, "message": "Failed to read stdin" },
+            "id": serde_json::Value::Null
+        });
+        println!("{}", err);
+        return;
+    }
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
+        // Empty input — silent exit (e.g., pipe with no data)
         return;
     }
 

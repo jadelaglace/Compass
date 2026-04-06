@@ -40,39 +40,32 @@ pub struct ScoringEngine;
 
 impl ScoringEngine {
     /// Compute final score with decay applied to each dimension.
+    /// Method 2: each dimension independently decays, then weighted sum.
+    /// final = (interest * decay_i * 0.4) + (strategy * decay_s * 0.35) + (consensus * decay_c * 0.25)
     pub fn compute(input: ScoringInput) -> ScoringOutput {
-        let (days_elapsed, decay_factor) =
-            Self::compute_decay_factor(&input.last_boosted_at);
-
-        // Weighted base score (pre-decay)
-        let base_score =
-            input.interest * WEIGHT_INTEREST
-            + input.strategy * WEIGHT_STRATEGY
-            + input.consensus * WEIGHT_CONSENSUS;
-
-        let final_score = base_score * decay_factor;
-
-        ScoringOutput {
-            final_score: Self::round2(final_score),
-            decay_factor: Self::round6(decay_factor),
-            days_elapsed: Self::round2(days_elapsed),
-        }
-    }
-
-    /// Compute the composite decay factor from all three half-lives.
-    fn compute_decay_factor(last_boosted_at: &str) -> (f64, f64) {
-        let days_elapsed = Self::days_since(last_boosted_at);
+        let days_elapsed = Self::days_since(&input.last_boosted_at);
 
         let decay_interest = DecayCalculator::new(30.0).factor(days_elapsed);
         let decay_strategy = DecayCalculator::new(365.0).factor(days_elapsed);
         let decay_consensus = DecayCalculator::new(60.0).factor(days_elapsed);
 
-        // Composite decay = weighted average of individual decays
-        let composite = decay_interest * WEIGHT_INTEREST
+        // Each dimension independently decayed, then weighted
+        let final_score =
+            input.interest * decay_interest * WEIGHT_INTEREST
+            + input.strategy * decay_strategy * WEIGHT_STRATEGY
+            + input.consensus * decay_consensus * WEIGHT_CONSENSUS;
+
+        // Composite decay factor for reporting
+        let decay_factor =
+            decay_interest * WEIGHT_INTEREST
             + decay_strategy * WEIGHT_STRATEGY
             + decay_consensus * WEIGHT_CONSENSUS;
 
-        (days_elapsed, composite)
+        ScoringOutput {
+            final_score: Self::round2(final_score),
+            decay_factor: Self::round2(decay_factor),
+            days_elapsed: Self::round2(days_elapsed),
+        }
     }
 
     /// Parse ISO 8601 timestamp and compute days since.
@@ -90,11 +83,7 @@ impl ScoringEngine {
     }
 
     fn round2(v: f64) -> f64 {
-        (v * 100.0).round() / 100.0
-    }
-
-    fn round6(v: f64) -> f64 {
-        (v * 1_000_000.0).round() / 1_000_000.0
+        format!("{:.2}", v).parse().unwrap_or(v)
     }
 }
 
