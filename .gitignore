@@ -19,3 +19,10 @@ __pycache__/
 .env.*
 *.pem
 *.key
+bin/
+data/
+.venv/
+*.db
+*.db-shm
+*.db-wal
+.env
