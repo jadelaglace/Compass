@@ -140,6 +140,30 @@ Phase 3（可视化层 · 可选）
 
 ---
 
+## 接口演进路线（REST → MCP）
+
+### OpenClaw Agent Phase 1 接入方式
+
+```
+飞书消息
+    ↓
+OpenClaw Agent（现成 Bot，LLM 驱动）
+    ↓ Tool Call（OpenClaw Skill）
+compass-api（FastAPI REST）
+    ↓ subprocess JSON-RPC
+Rust Core（compass-core）
+```
+
+**OpenClaw Skill 是 Agent 访问 Compass 的唯一渠道，不直接调 REST。**
+
+| 阶段 | 接口形式 | Agent 接入方式 |
+|------|---------|---------------|
+| **Phase 1** | FastAPI REST | OpenClaw Skill（封装 HTTP） |
+| **Phase 2** | REST + MCP Server | OpenClaw Skill → MCP Tools 迁移 |
+| **稳定期** | MCP Server 为主 | REST 可选关闭 |
+
+---
+
 ## 接口预留规范（Phase 1 必须遵守）
 
 ### 1. 向量语义扩展接口

@@ -450,37 +450,30 @@ class VaultWatcher:
 
 ---
 
-### 3.4 飞书 Bot（Python 层）
+### 3.4 飞书 Bot + OpenClaw Agent（Phase 1 接入架构）
 
-**架构：**
+**实际架构（Phase 1）：**
 
 ```
-用户消息 → 飞书 WebSocket → Agent Runtime (LLM) → FastAPI Tool Calls → compass-core (Rust)
+飞书消息
+    ↓
+OpenClaw Agent（现成 Bot，LLM 驱动）
+    ↓ Tool Call（OpenClaw Skill）
+compass-api（FastAPI REST）
+    ↓ subprocess JSON-RPC
+Rust Core（compass-core）
+    ↓
+SQLite + Obsidian Vault
 ```
 
-**Tool Use 接口（FastAPI 暴露，供 Agent 调用）：**
+**关键说明：**
+- 飞书 Bot 是 OpenClaw 内置能力（lark-oapi WebSocket 由 OpenClaw 处理）
+- OpenClaw Agent 负责意图理解 + 工具调用
+- **OpenClaw Skill**（封装 HTTP 调用）是 Agent 访问 compass-api 的唯一途径
+- compass-api 对外暴露 REST 接口，Skill 负责将 REST 映射为 Agent Tool
+- Phase 2：OpenClaw Skill 逐步迁移到 MCP Server（Skill 废弃）
 
-| Tool Name | 用途 | 调用 compass-core |
-|-----------|------|------------------|
-| `create_entity` | 创建实体到 Inbox | ✅ |
-| `search_entities` | FTS5 全文搜索 | ❌ (Python SQLite FTS5) |
-| `update_score` | 手动调整评分 | ✅ compute_score |
-| `get_strategic_focus` | 获取战略焦点 | ✅ compute_score |
-| `get_entity` | 获取单个实体详情 | ❌ |
-| `get_context` | Agent 上下文注入 | ✅ compute_score |
-
-```python
-# compass-api/src/services/feishu_bot.py
-# Phase 1: Agent (LLM) 负责意图理解
-# Phase 2: 替换为 MCP Server 适配层
-
-class FeishuBotService:
-    def __init__(self, rust_client: RustClient):
-        self.rust_client = rust_client
-        # lark-oapi WebSocket 事件处理
-```
-
-**⚠️ 网络挑战：飞书 WebSocket 需要公网 HTTPS 回调地址。开发环境用 ngrok 透传。**
+**⚠️ 网络：OpenClaw Gateway 自带 HTTPS 回调，无需额外 ngrok。**
 
 ---
 
@@ -522,6 +515,121 @@ async def get_context(req: AgentContextRequest) -> AgentContextResponse:
         suggested_entities=[s["id"] for s in scored[req.top_k:req.top_k*2]],
         reasoning=f"基于 strategy 加权 {scored[0]['scores']['strategy']} 和 consensus {scored[0]['scores']['consensus']} 筛选",
     )
+```
+
+---
+
+### 3.6 OpenClaw Skill（Phase 1 Agent 接入方式）
+
+OpenClaw Skill 是 OpenClaw Agent 访问 compass-api 的封装层。
+Agent 通过 Skill 定义的 Tool 与 Compass 交互，不直接调用 REST API。
+
+**项目结构：**
+```
+compass-skill/                  # OpenClaw Skill 包
+├── SKILL.md                    # Skill 定义（OpenClaw 规范）
+├── scripts/
+│   ├── search.py               # 封装 GET /entities/search
+│   ├── create.py               # 封装 POST /entities
+│   ├── score.py                # 封装 POST /scores/update
+│   ├── context.py              # 封装 POST /agent/context
+│   └── fetch.py                 # 封装 POST /fetch
+└── requirements.txt
+```
+
+**Tool 列表（Phase 1）：**
+
+| Tool Name | 调用 API | 用途 |
+|-----------|---------|------|
+| `compass_search` | `GET /entities/search` | FTS5 全文搜索 |
+| `compass_create` | `POST /entities` | 快速记录到 Inbox |
+| `compass_score` | `POST /scores/update` | 手动调整评分 |
+| `compass_context` | `POST /agent/context` | Agent 上下文注入 |
+| `compass_fetch` | `POST /fetch` | URL 内容抓取（Phase 1 Agent 自己清洗）|
+
+**Tool 与 REST 端点一一对应，Skill 是 Agent 的唯一调用渠道。**
+
+**Phase 2 演进：**
+- MCP Server 适配层加入 compass-api
+- Skill 工具逐步迁移为 MCP Tools
+- Skill 进入维护模式，最终废弃
+
+---
+
+### 3.7 接口演进路线（REST → MCP）
+
+| 阶段 | 接口形式 | Agent 接入方式 |
+|------|---------|---------------|
+| **Phase 1** | FastAPI REST | OpenClaw Skill（封装 HTTP 调用） |
+| **Phase 2** | REST + MCP Server 双接口 | OpenClaw Skill → MCP Tools 迁移 |
+| **稳定期** | MCP Server 为主 | REST 可选关闭 |
+
+**OpenClaw Skill 演进路径：**
+```
+Phase 1: OpenClaw Agent → Skill（HTTP）→ compass-api REST
+Phase 2: OpenClaw Agent → Skill（MCP 兼容）→ compass-api MCP Server
+Phase 3: OpenClaw Agent → MCP Native → compass-api MCP Server
+```
+
+---
+
+### 3.8 /fetch 与 /clean 接口（Phase 1/2 行为）
+
+#### 3.8.1 /fetch 接口
+
+```python
+@app.post("/fetch")
+async def fetch_url(url: str) -> FetchResult:
+    """
+    Phase 1: Agent 自己调 firecrawl/exa API
+              Agent 负责清洗 + 格式化
+              调用 POST /entities 写入
+
+    Phase 2: 全自动 pipeline
+              /fetch → 内部 firecrawl → /clean → /entities
+    """
+    raise NotImplementedError(
+        "Phase 1: Agent calls firecrawl/exa directly. "
+        "Agent handles cleaning + formatting before POST /entities."
+    )
+```
+
+**Phase 1 调用链：**
+```
+用户: "把这个页面存进来 https://..."
+    → OpenClaw Agent 理解意图
+    → Agent 调用 firecrawl/exa API 获取正文
+    → Agent 清洗 + 格式化 Markdown
+    → Agent 调用 POST /entities → 写入 Vault
+```
+
+#### 3.8.2 /clean 接口（Phase 2 预埋）
+
+```python
+@app.post("/clean")
+async def clean_content(raw: str, source: str = "manual") -> CleanedContent:
+    """
+    Phase 1: NotImplemented
+    Phase 2: 数据清洗 pipeline
+
+    输入：原始文本 / HTML
+    输出：清洗后的 Markdown
+    """
+    raise NotImplementedError("Phase 2 pipeline")
+
+
+class CleanedContent(BaseModel):
+    title: str
+    content: str           # 清洗后的 Markdown
+    summary: str | None    # 可选摘要
+    tags: list[str]       # 可选自动标签
+    source_url: str | None
+    cleaned_at: str        # ISO 8601
+```
+
+**Phase 2 全自动流程：**
+```
+/fetch → 提取正文 → /clean → 清洗 → /entities → 写入 Vault
 ```
 
 ---
