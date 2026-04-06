@@ -1,5 +1,5 @@
 -- Compass SQLite Schema
--- SQLite WAL mode, FTS5 enabled
+-- SQLite WAL mode, FTS5 + sync triggers
 
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -34,10 +34,12 @@ CREATE TABLE IF NOT EXISTS scores (
 );
 
 -- Bidirectional references
+-- FK on source_id enforced, target_id intentionally unconstrained
+-- (a note may reference a future note not yet in the system)
 CREATE TABLE IF NOT EXISTS "references" (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id   TEXT NOT NULL REFERENCES entities(id),
-    target_id   TEXT NOT NULL REFERENCES entities(id),
+    target_id   TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     UNIQUE(source_id, target_id)
 );
@@ -51,14 +53,11 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     created_at  TEXT NOT NULL
 );
 
--- FTS5 full-text search
+-- FTS5 full-text search (plain — triggers handle sync manually)
 CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
     id,
     title,
-    content,
-    category,
-    content='entities',
-    content_rowid='rowid'
+    category
 );
 
 -- Indexes
@@ -67,3 +66,24 @@ CREATE INDEX IF NOT EXISTS idx_scores_final_score ON scores(final_score DESC);
 CREATE INDEX IF NOT EXISTS idx_references_source ON "references"(source_id);
 CREATE INDEX IF NOT EXISTS idx_references_target ON "references"(target_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_entity ON timeline_events(entity_id);
+
+-- FTS5 sync triggers (keep full-text index consistent with entities table)
+CREATE TRIGGER IF NOT EXISTS entities_fts_insert
+AFTER INSERT ON entities BEGIN
+    INSERT INTO entities_fts(id, title, category)
+    VALUES (new.id, new.title, new.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS entities_fts_delete
+AFTER DELETE ON entities BEGIN
+    INSERT INTO entities_fts(entities_fts, id, title, category)
+    VALUES ('delete', old.id, old.title, old.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS entities_fts_update
+AFTER UPDATE ON entities BEGIN
+    INSERT INTO entities_fts(entities_fts, id, title, category)
+    VALUES ('delete', old.id, old.title, old.category);
+    INSERT INTO entities_fts(id, title, category)
+    VALUES (new.id, new.title, new.category);
+END;

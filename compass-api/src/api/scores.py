@@ -44,7 +44,7 @@ async def update_score(update: ScoreUpdate, db: Database = Depends(get_db)) -> S
         last_boosted_at=last_boosted,
     )
 
-    await db.upsert_score({
+    score_data = {
         "entity_id": update.entity_id,
         "interest": interest,
         "strategy": strategy,
@@ -52,16 +52,26 @@ async def update_score(update: ScoreUpdate, db: Database = Depends(get_db)) -> S
         "final_score": round(score_result.final_score, 2),
         "manual_override": update.manual_override,
         "updated_at": now,
-    })
+    }
 
-    if update.manual_override:
-        await db.conn.execute(
-            "UPDATE entities SET last_boosted_at = ? WHERE id = ?",
-            (now, update.entity_id),
+    # Atomic: score update + event log (both succeed or both rollback)
+    await db.begin()
+    try:
+        await db.upsert_score(score_data)
+        if update.manual_override:
+            await db.conn.execute(
+                "UPDATE entities SET last_boosted_at = ? WHERE id = ?",
+                (now, update.entity_id),
+            )
+        await db.log_event(
+            update.entity_id,
+            "score_updated",
+            trigger="manual" if update.manual_override else "auto",
         )
-        await db.conn.commit()
-
-    await db.log_event(update.entity_id, "score_updated", trigger="manual" if update.manual_override else "auto")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
     return ScoreResponse(
         entity_id=update.entity_id,

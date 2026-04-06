@@ -27,11 +27,11 @@ async def get_context(req: ContextRequest, db: Database = Depends(get_db)) -> Co
 
     scored = []
     for e in candidates:
-        last_boosted = e.get("last_boosted_at", "")
+        last_boosted = e.get("last_boosted_at") or ""
         score_result = rust_client.compute_score(
-            interest=float(e.get("interest", 5.0)),
-            strategy=float(e.get("strategy", 5.0)),
-            consensus=float(e.get("consensus", 0.0)),
+            interest=float(e.get("interest") or 5.0),
+            strategy=float(e.get("strategy") or 5.0),
+            consensus=float(e.get("consensus") or 0.0),
             last_boosted_at=last_boosted,
         )
         e["final_score"] = round(score_result.final_score, 2)

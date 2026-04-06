@@ -1,8 +1,8 @@
 """SQLite database manager — async aiosqlite, WAL mode."""
 from __future__ import annotations
 
-import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,20 +17,23 @@ async def init_db(db_path: Optional[Path] = None) -> aiosqlite.Connection:
     """Open DB, run schema, return connection (caller owns it)."""
     path = db_path or cfg.DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(str(path))
+    conn = await aiosqlite.connect(str(path), isolation_level=None)
     conn.row_factory = aiosqlite.Row
     # WAL + foreign keys
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
-    # Schema
+    # Schema (includes FTS triggers)
     schema = SCHEMA_PATH.read_text()
     await conn.executescript(schema)
-    await conn.commit()
     return conn
 
 
 class Database:
-    """Thin async wrapper around aiosqlite — one connection per Database instance."""
+    """Thin async wrapper around aiosqlite — one connection per Database instance.
+
+    Caller is responsible for explicit transaction control via begin()/commit()/rollback().
+    This allows wrapping multiple operations atomically.
+    """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = db_path or cfg.DB_PATH
@@ -50,9 +53,24 @@ class Database:
             raise RuntimeError("Database not connected — call .connect() first")
         return self._conn
 
+    # ---- explicit transaction control ----
+
+    async def begin(self) -> None:
+        """Begin a transaction (EXCLUSIVE for writes)."""
+        await self.conn.execute("BEGIN EXCLUSIVE")
+
+    async def commit(self) -> None:
+        """Commit the current transaction."""
+        await self.conn.execute("COMMIT")
+
+    async def rollback(self) -> None:
+        """Roll back the current transaction."""
+        await self.conn.execute("ROLLBACK")
+
     # ---- entities ----
 
     async def upsert_entity(self, data: dict[str, Any]) -> None:
+        """Insert or update an entity. Caller manages transaction."""
         await self.conn.execute(
             """
             INSERT INTO entities (id, file_path, vault_path, title, category,
@@ -84,9 +102,10 @@ class Database:
                 "metadata": json.dumps(data.get("metadata", {})),
             },
         )
-        await self.conn.commit()
+        # NOTE: no commit() here — caller controls transaction
 
     async def upsert_score(self, data: dict[str, Any]) -> None:
+        """Insert or update a score. Caller manages transaction."""
         await self.conn.execute(
             """
             INSERT INTO scores (entity_id, interest, strategy, consensus,
@@ -118,7 +137,59 @@ class Database:
                 "updated_at": data["updated_at"],
             },
         )
-        await self.conn.commit()
+        # NOTE: no commit() here — caller controls transaction
+
+    async def upsert_reference(self, source_id: str, target_id: str) -> None:
+        """Insert a reference (source→target). FK check disabled intentionally:
+        target may not exist yet (forward link to future note).
+        Caller manages transaction."""
+        now = datetime.utcnow().isoformat() + "Z"
+        await self.conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            await self.conn.execute(
+                'INSERT OR IGNORE INTO "references" (source_id, target_id, created_at) VALUES (?, ?, ?)',
+                (source_id, target_id, now),
+            )
+        finally:
+            await self.conn.execute("PRAGMA foreign_keys=ON")
+        # NOTE: no commit() here — caller controls transaction
+
+    async def log_event(
+        self, entity_id: str, event_type: str, trigger: Optional[str] = None
+    ) -> None:
+        """Log a timeline event. Caller manages transaction."""
+        now = datetime.utcnow().isoformat() + "Z"
+        await self.conn.execute(
+            "INSERT INTO timeline_events (entity_id, event_type, trigger, created_at) VALUES (?, ?, ?, ?)",
+            (entity_id, event_type, trigger, now),
+        )
+        # NOTE: no commit() here — caller controls transaction
+
+    # ---- atomic create (all-or-nothing) ----
+
+    async def create_entity_full(
+        self,
+        entity_data: dict[str, Any],
+        score_data: dict[str, Any],
+        ref_ids: list[str],
+        event_type: str = "created",
+        event_trigger: str = "api",
+    ) -> None:
+        """Atomically create entity + score + references + event in one transaction.
+        Raises on any failure; rolls back entirely on error."""
+        await self.begin()
+        try:
+            await self.upsert_entity(entity_data)
+            await self.upsert_score(score_data)
+            for ref_id in ref_ids:
+                await self.upsert_reference(entity_data["id"], ref_id)
+            await self.log_event(entity_data["id"], event_type, event_trigger)
+            await self.commit()
+        except Exception:
+            await self.rollback()
+            raise
+
+    # ---- read operations ----
 
     async def get_entity(self, entity_id: str) -> Optional[dict[str, Any]]:
         async with self.conn.execute(
@@ -183,29 +254,6 @@ class Database:
             [r["target_id"] for r in out_rows],
             [r["source_id"] for r in in_rows],
         )
-
-    async def upsert_reference(self, source_id: str, target_id: str) -> None:
-        from datetime import datetime
-        now = datetime.utcnow().isoformat() + "Z"
-        # Disable FK check — target may not exist yet (backlink to future note)
-        await self.conn.execute("PRAGMA foreign_keys=OFF")
-        await self.conn.execute(
-            'INSERT OR IGNORE INTO "references" (source_id, target_id, created_at) VALUES (?, ?, ?)',
-            (source_id, target_id, now),
-        )
-        await self.conn.execute("PRAGMA foreign_keys=ON")
-        await self.conn.commit()
-
-    async def log_event(
-        self, entity_id: str, event_type: str, trigger: Optional[str] = None
-    ) -> None:
-        from datetime import datetime
-        now = datetime.utcnow().isoformat() + "Z"
-        await self.conn.execute(
-            "INSERT INTO timeline_events (entity_id, event_type, trigger, created_at) VALUES (?, ?, ?, ?)",
-            (entity_id, event_type, trigger, now),
-        )
-        await self.conn.commit()
 
 
 # ---- FastAPI dependency ----

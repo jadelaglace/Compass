@@ -41,13 +41,13 @@ async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) ->
     vault_path = entity.vault_path
     file_path = entity.file_path or str(config.VAULT_PATH / vault_path)
 
-    # Parse refs via Rust
+    # Parse refs via Rust (outside transaction — read-only)
     refs: list[str] = []
     if entity.content:
         refs_result = rust_client.parse_refs(entity.content, current_id=entity.id)
         refs = refs_result.refs
 
-    # Score via Rust
+    # Score via Rust (outside transaction — read-only computation)
     score_result = rust_client.compute_score(
         interest=entity.interest,
         strategy=entity.strategy,
@@ -55,8 +55,7 @@ async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) ->
         last_boosted_at=now,
     )
 
-    # Persist entity
-    await db.upsert_entity({
+    entity_data = {
         "id": entity.id,
         "file_path": file_path,
         "vault_path": vault_path,
@@ -65,23 +64,25 @@ async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) ->
         "created_at": now,
         "updated_at": now,
         "metadata": entity.metadata,
-    })
+    }
 
-    # Persist score
-    await db.upsert_score({
+    score_data = {
         "entity_id": entity.id,
         "interest": entity.interest,
         "strategy": entity.strategy,
         "consensus": entity.consensus,
         "final_score": round(score_result.final_score, 2),
         "updated_at": now,
-    })
+    }
 
-    # Persist references
-    for ref_id in refs:
-        await db.upsert_reference(entity.id, ref_id)
-
-    await db.log_event(entity.id, "created", trigger="api")
+    # Atomic write: entity + score + refs + event all succeed or all rollback
+    await db.create_entity_full(
+        entity_data=entity_data,
+        score_data=score_data,
+        ref_ids=refs,
+        event_type="created",
+        event_trigger="api",
+    )
 
     return EntityResponse(
         id=entity.id,
