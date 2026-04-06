@@ -140,4 +140,24 @@ mod tests {
         // 8*0.4 + 9*0.35 + 4*0.25 = 3.2 + 3.15 + 1.0 = 7.35
         assert!((output.final_score - 7.35).abs() < 0.01);
     }
+
+    #[test]
+    fn test_final_score_with_decay_method2() {
+        // 30 days ago: interest decay = 0.5, strategy decay ≈ 0.94, consensus decay ≈ 0.69
+        let past = "2026-03-07T00:00:00Z";
+        let input = ScoringInput {
+            interest: 10.0,
+            strategy: 10.0,
+            consensus: 10.0,
+            last_boosted_at: past.to_string(),
+            interest_half_life_days: 30.0,
+            strategy_half_life_days: 365.0,
+            consensus_half_life_days: 60.0,
+        };
+        let output = ScoringEngine::compute(input);
+        // Method 2: (10*0.5*0.4) + (10*decay_s*0.35) + (10*decay_c*0.25) < 10.0
+        assert!(output.final_score < 10.0); // Must be less than 10.0 due to decay
+        assert!(output.final_score > 6.0);  // But meaningfully above floor
+        assert!(output.days_elapsed > 20.0); // ~30 days elapsed
+    }
 }
