@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 static REF_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"\[\[([a-zA-Z0-9_-]+)\]\]"#).unwrap()
+    Regex::new(r#"\[\[([a-zA-Z0-9_/-]+)\]\]"#).unwrap()
 });
 
 /// Parser for [[id]] style references in markdown.
