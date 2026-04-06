@@ -10,9 +10,14 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "httpx>=0.28.0",
     "watchdog>=4.0.0",
+    "python-frontmatter>=1.1.0",
     "python-dotenv>=1.0.0",
     "lark-oapi>=1.5.0,<1.6.0",
 ]
+
+[project.scripts]
+compass-api  = "src.main:run"
+compass-watch = "src.services.filewatcher:run_watcher"
 
 [project.optional-dependencies]
 dev = [

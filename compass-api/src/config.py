@@ -1,9 +1,11 @@
 """Application configuration — all env-driven, no magic constants."""
 from pathlib import Path
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from the same directory as this file (compass-api/src/)
+_src_dir = Path(__file__).parent.parent
+load_dotenv(_src_dir / ".env")
 
 # Base directory (where this file lives — compass-api/src/)
 BASE_DIR = Path(__file__).parent.parent
