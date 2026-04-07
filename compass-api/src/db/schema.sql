@@ -1,8 +1,7 @@
 -- Compass SQLite Schema
--- SQLite WAL mode, FTS5 + sync triggers
-
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
+-- FTS5 + sync triggers + indexes
+-- NOTE: PRAGMA journal_mode=WAL and PRAGMA foreign_keys=ON are set in init_db(),
+--       not here, to avoid pragma parsing issues in executescript().
 
 -- Entities (one per Obsidian note)
 CREATE TABLE IF NOT EXISTS entities (
