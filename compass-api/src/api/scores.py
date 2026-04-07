@@ -37,7 +37,7 @@ async def update_score(update: ScoreUpdate, db: Database = Depends(get_db)) -> S
     consensus = update.consensus if update.consensus is not None else float(entity.get("consensus", 0.0))
     last_boosted = entity.get("last_boosted_at") or now
 
-    score_result = rust_client.compute_score(
+    score_result = await rust_client.compute_score(
         interest=interest,
         strategy=strategy,
         consensus=consensus,

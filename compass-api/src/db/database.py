@@ -13,16 +13,51 @@ from src import config as cfg
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
+# ---- FTS query sanitizer ----
+
+_ESCAPE_CHARS = str.maketrans({
+    '"': '""',   # phrase delimiter — escape for FTS5
+    "*": " ",    # prefix wildcard — strip (prevents open-ended prefix matching)
+    "(": " ",
+    ")": " ",
+    "-": " ",    # negation operator
+    "+": " ",
+    "^": " ",
+    ":": " ",
+    "{": " ",
+    "}": " ",
+    "~": " ",
+})
+
+
+def _escape_fts_query(raw: str) -> str:
+    """Escape FTS5 special characters to treat them as literal search terms.
+
+    FTS5 MATCH has its own query language (* prefix, OR/AND/NOT booleans,
+    "phrase" delimiters, etc.).  User input passed raw can alter query semantics
+    or cause errors.  Escape all FTS operators so they become plain tokens.
+    """
+    # Strip leading/trailing whitespace; collapse internal runs of spaces.
+    token = " ".join(raw.split())
+    if not token:
+        return '""'  # empty query → match-nothing (safer than match-all)
+    # Escape special FTS characters; wrap as phrase to prevent tokenization issues.
+    escaped = token.translate(_ESCAPE_CHARS)
+    # Collapse any resulting double-spaces left by removed operators.
+    return " ".join(escaped.split())
+
+
 async def init_db(db_path: Optional[Path] = None) -> aiosqlite.Connection:
-    """Open DB, run schema, return connection (caller owns it)."""
+    """Open DB, set WAL mode, enable FK, run schema, return connection (caller owns it)."""
     path = db_path or cfg.DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(str(path), isolation_level=None)
     conn.row_factory = aiosqlite.Row
-    # WAL + foreign keys
+    # WAL mode and foreign keys must be set immediately after connect,
+    # before any schema statements — not inside the schema file.
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
-    # Schema (includes FTS triggers)
+    # Schema (FTS triggers, tables, indexes — no pragma)
     schema = SCHEMA_PATH.read_text()
     await conn.executescript(schema)
     return conn
@@ -201,6 +236,9 @@ class Database:
     async def search_entities(
         self, query: str, limit: int = 20
     ) -> list[dict[str, Any]]:
+        # FTS5 MATCH injection guard: escape FTS5 query operators so user input
+        # is treated as a literal token/phrase, not a search expression.
+        safe_q = _escape_fts_query(query)
         cur = await self.conn.execute(
             """
             SELECT e.*, s.final_score
@@ -211,7 +249,7 @@ class Database:
             ORDER BY rank
             LIMIT ?
             """,
-            (query, limit),
+            (safe_q, limit),
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
@@ -219,14 +257,18 @@ class Database:
     async def get_top_entities(
         self, limit: int = 20, category: Optional[str] = None
     ) -> list[dict[str, Any]]:
+        # LEFT JOIN + ORDER BY nullable column: filter NULLs for stable sort.
+        # SQLite's NULL ordering is implementation-defined; exclude rows
+        # without a score to keep ordering deterministic.
         q = """
             SELECT e.*, s.final_score
             FROM entities e
             LEFT JOIN scores s ON s.entity_id = e.id
+            WHERE s.final_score IS NOT NULL
         """
         params: list[Any] = []
         if category:
-            q += " WHERE e.category = ?"
+            q += " AND e.category = ?"
             params.append(category)
         q += " ORDER BY s.final_score DESC LIMIT ?"
         params.append(limit)
