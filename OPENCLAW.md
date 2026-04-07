@@ -117,15 +117,17 @@ Phase 3（可视化层 · 可选）
 
 ### 必须交付（P0）
 
-| 模块 | 功能 | 说明 |
-|------|------|------|
-| **Vault结构** | 目录规范 + 模板体系 | Inbox/Direction/Knowledge/Logs/Insights |
-| **文件监听** | watchdog 实时同步 | 文件增删改 → SQLite 索引自动更新 |
-| **引用解析** | `[[id]]` 双向链接 | outgoing + incoming 自动维护 |
-| **评分引擎** | interest / strategy / consensus | 30天半衰期衰减，支持手动覆盖 |
-| **飞书Bot** | `/q` `/r` `/s` `/f` 命令 | 快速记录、搜索、评分查看、战略焦点 |
-| **URL抓取** | `/fetch` 接口 | Agent 调用获取正文（Phase 1 不过清洗） |
-| **Agent API** | `/agent/context` | 上下文准备、建议链接、批量操作 |
+| 模块 | 功能 | 说明 | 状态 |
+|------|------|------|------|
+| **Vault结构** | 目录规范 + 模板体系 | Inbox/Direction/Knowledge/Logs/Insights | ✅ |
+| **文件监听** | watchdog 实时同步 | 文件增删改 → SQLite 索引自动更新 | ✅ |
+| **引用解析** | `[[id]]` 双向链接 | outgoing + incoming 自动维护 | ✅ |
+| **评分引擎** | interest / strategy / consensus | 30天半衰期衰减，支持手动覆盖 | ✅ |
+| **飞书Bot** | `/q` `/r` `/s` `/f` 命令 | 快速记录、搜索、评分查看、战略焦点 | 🔴 |
+| **URL抓取** | `/fetch` 接口 | Agent 调用获取正文（Phase 1 不过清洗） | 🔴 |
+| **Agent API** | `/agent/context` | 上下文准备、建议链接、批量操作 | 🔴 |
+
+> **截至 2026-04-07：** P0 前四项已完成（PR #13 合并），FileWatcher + Vault Service + 引用解析全部打通。飞书Bot、URL抓取、Agent API 为待开发状态。
 
 ### 预留接口（P1，Phase 1 只留插口）
 
@@ -220,15 +222,17 @@ class MCPLayer:
 ## 开发节奏
 
 ```
-Week 1-2: Vault结构 + 文件监听 + SQLite Schema
-Week 3-4: 评分引擎 + Timeline事件 + 引用解析
-Week 5-6: FastAPI + /agent/* 接口 + 飞书Bot
+Week 1-2: Vault结构 + 文件监听 + SQLite Schema ✅
+Week 3-4: 评分引擎 + Timeline事件 + 引用解析 ✅ (PR #13 合并)
+Week 5-6: FastAPI + /agent/* 接口 + 飞书Bot 🔴 进行中
 Week 7:   集成测试 + 端到端验收
 Week 8:   文档 + 备份方案 + MVP发布
 
 Phase 2:  向量语义层（Phase 1 稳定运行30天后启动）
 Phase 3:  可视化层（按需）
 ```
+
+> **当前进度（2026-04-07）：** Week 1-4 已完成，P0 前四项全部 ✅。下一步：Week 5-6，FastAPI /agent/* 接口 + 飞书Bot。
 
 ---
 
