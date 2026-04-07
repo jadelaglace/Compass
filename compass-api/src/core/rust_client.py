@@ -41,9 +41,9 @@ class RustClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate(
-            input=json.dumps(payload).encode(),
-            timeout=10,
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=json.dumps(payload).encode()),
+            timeout=10.0,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"Rust binary error: {stderr.decode()}")

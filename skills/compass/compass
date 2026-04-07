@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+Compass CLI — OpenClaw Skill entry point.
+
+Usage:
+    compass <action> [key=value ...]
+
+Actions:
+    search   Full-text search across entities
+    top      Top-scored entities (optional category filter)
+    get      Single entity by ID (includes refs)
+    feed     Daily digest (top inbox + recent + strategic)
+    context  Agent context injection
+    create   Create new entity
+    score    Update entity scores
+
+Environment:
+    COMPASS_API_URL  API base URL (default: http://localhost:8080)
+"""
+
+import sys
+import os
+import json
+import argparse
+import urllib.request
+import urllib.error
+import urllib.parse
+
+
+def get_api_url() -> str:
+    return os.environ.get("COMPASS_API_URL", "http://localhost:8080")
+
+
+def api_url(path: str) -> str:
+    return f"{get_api_url().rstrip('/')}/{path.lstrip('/')}"
+
+
+def http_get(path: str, params: dict | None = None) -> dict:
+    url = api_url(path)
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url)
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        try:
+            err_body = json.loads(body)
+            print(json.dumps({"error": err_body.get("detail", body), "status": e.code}), file=sys.stderr)
+        except Exception:
+            print(json.dumps({"error": body or e.reason, "status": e.code}), file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(json.dumps({"error": f"connection refused — is compass-api running? ({e.reason})"}), file=sys.stderr)
+        sys.exit(1)
+
+
+def http_post(path: str, data: dict) -> dict:
+    url = api_url(path)
+    body_bytes = json.dumps(data).encode()
+    req = urllib.request.Request(url, data=body_bytes)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        try:
+            err_body = json.loads(body)
+            print(json.dumps({"error": err_body.get("detail", body), "status": e.code}), file=sys.stderr)
+        except Exception:
+            print(json.dumps({"error": body or e.reason, "status": e.code}), file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(json.dumps({"error": f"connection refused — is compass-api running? ({e.reason})"}), file=sys.stderr)
+        sys.exit(1)
+
+
+def parse_keyval(args: list[str]) -> dict:
+    """Parse key=value arguments into a dict."""
+    result = {}
+    for arg in args:
+        if "=" in arg:
+            key, val = arg.split("=", 1)
+            result[key.strip()] = val.strip()
+    return result
+
+
+# ---- Actions ----
+
+
+def action_search(params: dict) -> None:
+    q = params.get("q", "")
+    limit = int(params.get("limit", 20))
+    result = http_get("/entities/search", {"q": q, "limit": limit})
+    print(json.dumps(result, indent=2))
+
+
+def action_top(params: dict) -> None:
+    limit = int(params.get("limit", 20))
+    category = params.get("category") or None
+    result = http_get("/entities/top", {"limit": limit, **(({"category": category}) if category else {})})
+    print(json.dumps(result, indent=2))
+
+
+def action_get(params: dict) -> None:
+    entity_id = params.get("id")
+    if not entity_id:
+        print(json.dumps({"error": "id is required"}), file=sys.stderr)
+        sys.exit(1)
+    result = http_get(f"/entities/{entity_id}")
+    print(json.dumps(result, indent=2))
+
+
+def action_feed(params: dict) -> None:
+    limit = int(params.get("limit", 10))
+    result = http_get("/feed/today", {"limit": limit})
+    print(json.dumps(result, indent=2))
+
+
+def action_context(params: dict) -> None:
+    task = params.get("task")
+    if not task:
+        print(json.dumps({"error": "task is required"}), file=sys.stderr)
+        sys.exit(1)
+    top_k = int(params.get("top_k", 5))
+    result = http_post("/agent/context", {"task": task, "top_k": top_k})
+    print(json.dumps(result, indent=2))
+
+
+def action_create(params: dict) -> None:
+    required = ["id", "title", "vault_path"]
+    for field in required:
+        if not params.get(field):
+            print(json.dumps({"error": f"{field} is required"}), file=sys.stderr)
+            sys.exit(1)
+
+    data = {
+        "id": params["id"],
+        "title": params["title"],
+        "category": params.get("category", "Inbox"),
+        "vault_path": params["vault_path"],
+        "interest": float(params.get("interest", 5.0)),
+        "strategy": float(params.get("strategy", 5.0)),
+        "consensus": float(params.get("consensus", 0.0)),
+        "content": params.get("content") or None,
+    }
+    result = http_post("/entities", data)
+    print(json.dumps(result, indent=2))
+
+
+def action_score(params: dict) -> None:
+    entity_id = params.get("id")
+    if not entity_id:
+        print(json.dumps({"error": "id is required"}), file=sys.stderr)
+        sys.exit(1)
+
+    data = {"entity_id": entity_id}
+    for dim in ("interest", "strategy", "consensus"):
+        if dim in params:
+            data[dim] = float(params[dim])
+
+    result = http_post("/scores/update", data)
+    print(json.dumps(result, indent=2))
+
+
+# ---- Dispatch ----
+
+
+ACTIONS = {
+    "search": action_search,
+    "top": action_top,
+    "get": action_get,
+    "feed": action_feed,
+    "context": action_context,
+    "create": action_create,
+    "score": action_score,
+}
+
+
+def main() -> None:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0)
+
+    action = sys.argv[1]
+    if action not in ACTIONS:
+        print(json.dumps({"error": f"unknown action: {action}", "available": list(ACTIONS.keys())}), file=sys.stderr)
+        sys.exit(1)
+
+    # Remaining args are key=value pairs
+    params = parse_keyval(sys.argv[2:])
+    ACTIONS[action](params)
+
+
+if __name__ == "__main__":
+    main()
