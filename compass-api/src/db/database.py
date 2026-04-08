@@ -238,18 +238,20 @@ class Database:
     ) -> list[dict[str, Any]]:
         # FTS5 MATCH injection guard: escape FTS5 query operators so user input
         # is treated as a literal token/phrase, not a search expression.
+        # Note: MATCH clause must use string interpolation (not ? placeholder) —
+        # SQLite FTS5 does not support parameterised MATCH expressions.
         safe_q = _escape_fts_query(query)
         cur = await self.conn.execute(
-            """
+            f"""
             SELECT e.*, s.final_score
             FROM entities_fts f
             JOIN entities e ON e.id = f.id
             LEFT JOIN scores s ON s.entity_id = e.id
-            WHERE entities_fts MATCH ?
+            WHERE entities_fts MATCH '{safe_q}'
             ORDER BY rank
             LIMIT ?
             """,
-            (safe_q, limit),
+            (limit,),
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
