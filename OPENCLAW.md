@@ -255,17 +255,21 @@ Phase 3:  可视化层（按需）
 
 ### 铁律
 
-1. **禁止从非 master 分支创建 feat/fix/docs 分支** — 会携带不该合并的 commit，导致 PR 冲突爆炸
+1. **从哪个分支创建，就必须先拉那个分支的 最新** — feat/fix 从 develop 拉最新，docs 从 master 拉最新。违反此条会携带不该合并的 commit，导致 PR 冲突爆炸
 2. **develop 是默认开发分支** — 所有新功能先合入 develop，stable 后再进 master
-3. **必须先拉最新再开分支：**
+3. **开分支前必须拉最新（以 develop 为例）：**
    ```bash
-   git fetch origin master
-   git checkout master && git pull origin master
+   # feat/fix 分支
+   git checkout develop && git pull origin develop
    git checkout -b feat/18-feishu-bot
+
+   # docs 分支
+   git checkout master && git pull origin master
+   git checkout -b docs/5-contribution-guide
    ```
 4. **PR 必须关联 Issue** — Description 写清楚 Closes #18
 5. **Review 通过前禁止 self-merge**
-6. **Phase 1 稳定后** — develop 合并进 master，打版本 tag，进入 Phase 2
+6. **Phase 稳定后** — develop 合并进 master，打版本 tag，进入下一 Phase
 
 ---
 
