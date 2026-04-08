@@ -70,17 +70,13 @@ Phase 3（可视化层）
 
 ```
 1. 创建 Issue（描述要完整，包含验收标准）
-2. 从哪个分支创建，就先拉那个分支的最新（见下方命令）
+2. 拉最新 master（仅限文档分支）；从 develop 创建 feat/fix 分支
 3. git checkout -b feat/18-feishu-bot
 4. 开发 + 测试
 5. 提交 PR（包含：解决什么问题、怎么验证）
 6. Code Review（至少 1 人 Approve）
 7. Merge to develop（功能/修复）或 master（文档）
 8. Phase 稳定后：develop → master，打版本 tag
-
-# 拉最新命令：
-# feat/fix 分支 → git checkout develop && git pull origin develop
-# docs 分支     → git checkout master && git pull origin master
 ```
 
 ### 分支命名
