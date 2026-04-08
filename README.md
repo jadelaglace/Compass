@@ -51,22 +51,39 @@ Phase 3（可视化层）
 
 **所有参与者必须遵守完整的 Issue/PR 流程。**
 
+### 分支模型
+
+```
+长期分支：
+  master   — 稳定可发布状态，始终等于最新正式版
+  develop  — 下一版本开发集成分支
+
+临时分支：
+  feat/{issue}-{desc}   从 develop 创建
+  fix/{issue}-{desc}    从 develop 创建
+  docs/{issue}-{desc}    从 master 创建（文档单独流程）
+
+合并路径： feat/fix/docs → develop → master
+```
+
 ### 流程规范
 
 ```
 1. 创建 Issue（描述要完整，包含验收标准）
-2. 创建分支：git checkout -b feat/{issue-id}-{short-description}
-3. 开发 + 测试
-4. 提交 PR（包含：解决什么问题、怎么验证）
-5. Code Review（至少 1 人 Approve）
-6. Merge to master
+2. 拉最新 master（仅限文档分支）；从 develop 创建 feat/fix 分支
+3. git checkout -b feat/18-feishu-bot
+4. 开发 + 测试
+5. 提交 PR（包含：解决什么问题、怎么验证）
+6. Code Review（至少 1 人 Approve）
+7. Merge to develop（功能/修复）或 master（文档）
+8. Phase 稳定后：develop → master，打版本 tag
 ```
 
 ### 分支命名
 
 | 类型 | 格式 | 示例 |
 |------|------|------|
-| 功能 | `feat/{issue-id}-{description}` | `feat/2-TDD-phase1` |
+| 功能 | `feat/{issue-id}-{description}` | `feat/18-feishu-bot` |
 | 修复 | `fix/{issue-id}-{description}` | `fix/42-vault-path-bug` |
 | 文档 | `docs/{issue-id}-{description}` | `docs/5-contribution-guide` |
 
@@ -86,7 +103,7 @@ Phase 3（可视化层）
 - 结构性变更（架构、数据库 Schema）必须 CTO Review
 - 文档更新同样需要 Review（不允许 self-merge）
 
-### ⚠️ 重要
+### ⚠️ 铁律
 
 > **此要求适用于所有变更类型——代码、文档、配置、CI/CD。本规则本身更新也必须走 Issue/PR 流程。**
 

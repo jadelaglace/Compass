@@ -232,7 +232,40 @@ Phase 2:  向量语义层（Phase 1 稳定运行30天后启动）
 Phase 3:  可视化层（按需）
 ```
 
-> **当前进度（2026-04-07）：** Week 1-4 已完成，P0 前四项全部 ✅。下一步：Week 5-6，FastAPI /agent/* 接口 + 飞书Bot。
+> **当前进度（2026-04-08）：** Week 1-4 已完成，P0 前四项全部 ✅。OpenClaw Skill ✅ 已合入。下一步：飞书 Bot（Issue #18）。
+
+---
+
+## 分支管理流程
+
+```
+长期分支：
+  master   — 稳定可发布状态，始终等于最新正式版
+  develop  — 下一版本开发集成分支，所有功能并入此处
+
+临时分支（从 develop 或 master 创建）：
+  feat/{issue}-{short-desc}   功能分支
+  fix/{issue}-{short-desc}   修复分支
+  docs/{issue}-{short-desc}  文档分支
+
+合并路径：
+  feat/fix/docs → develop → master
+  （文档分支可从 master 创建，但必须通过 PR 合并）
+```
+
+### 铁律
+
+1. **禁止从非 master 分支创建 feat/fix/docs 分支** — 会携带不该合并的 commit，导致 PR 冲突爆炸
+2. **develop 是默认开发分支** — 所有新功能先合入 develop，stable 后再进 master
+3. **必须先拉最新再开分支：**
+   ```bash
+   git fetch origin master
+   git checkout master && git pull origin master
+   git checkout -b feat/18-feishu-bot
+   ```
+4. **PR 必须关联 Issue** — Description 写清楚 Closes #18
+5. **Review 通过前禁止 self-merge**
+6. **Phase 1 稳定后** — develop 合并进 master，打版本 tag，进入 Phase 2
 
 ---
 
