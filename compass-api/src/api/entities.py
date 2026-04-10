@@ -181,7 +181,11 @@ async def update_entity(
 
     now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
     vault_path = update.vault_path
-    file_path = update.file_path or str(config.VAULT_PATH / vault_path)
+    # Preserve existing file_path when not explicitly provided in the update.
+    # update.file_path=None means "don't change" (use stored value).
+    file_path = (
+        update.file_path if update.file_path is not None else existing["file_path"]
+    )
 
     score_data, refs = await _compute_score_and_refs(
         update.interest, update.strategy, update.consensus, update.content, entity_id
