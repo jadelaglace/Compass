@@ -31,7 +31,7 @@ async def update_score(update: ScoreUpdate, db: Database = Depends(get_db)) -> S
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    now = datetime.now(tz=timezone.utc).isoformat()
     interest = update.interest if update.interest is not None else float(entity.get("interest", 5.0))
     strategy = update.strategy if update.strategy is not None else float(entity.get("strategy", 5.0))
     consensus = update.consensus if update.consensus is not None else float(entity.get("consensus", 0.0))
