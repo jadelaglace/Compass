@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -16,17 +17,23 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # ---- FTS query sanitizer ----
 
 _ESCAPE_CHARS = str.maketrans({
-    '"': '""',   # phrase delimiter — escape for FTS5
-    "*": " ",    # prefix wildcard — strip (prevents open-ended prefix matching)
-    "(": " ",
-    ")": " ",
+    # SQL / FTS5 injection prevention
+    '"': "",     # double-quote stripped (phrase delimiter, not SQL-safe here)
+    "'": "",     # single-quote stripped (SQL string injection prevention)
+    "(": "",
+    ")": "",
+    # FTS5 operator stripping (treat user input as plain tokens)
+    "*": " ",    # prefix wildcard
     "-": " ",    # negation operator
-    "+": " ",
-    "^": " ",
-    ":": " ",
+    "+": " ",    # explicit AND operator
+    "^": " ",    # XOR operator
+    ":": " ",    # column filter
     "{": " ",
     "}": " ",
-    "~": " ",
+    "~": " ",    # approximate match
+    "[": " ",
+    "]": " ",
+    "!": " ",    # NOT shortcut in some FTS5 dialects
 })
 
 
@@ -37,12 +44,19 @@ def _escape_fts_query(raw: str) -> str:
     "phrase" delimiters, etc.).  User input passed raw can alter query semantics
     or cause errors.  Escape all FTS operators so they become plain tokens.
     """
+    # Reject oversized input before any processing.
+    if len(raw) > 200:
+        raise ValueError("Query exceeds maximum length of 200 characters")
     # Strip leading/trailing whitespace; collapse internal runs of spaces.
     token = " ".join(raw.split())
     if not token:
         return '""'  # empty query → match-nothing (safer than match-all)
     # Escape special FTS characters; wrap as phrase to prevent tokenization issues.
     escaped = token.translate(_ESCAPE_CHARS)
+    # Strip FTS5 boolean keywords (word-level, case-insensitive) so user
+    # text is always treated as literal tokens, never as search operators.
+    for kw in ("AND", "OR", "NOT"):
+        escaped = re.sub(rf"\b{kw}\b", " ", escaped, flags=re.IGNORECASE)
     # Collapse any resulting double-spaces left by removed operators.
     return " ".join(escaped.split())
 
@@ -236,8 +250,12 @@ class Database:
     async def search_entities(
         self, query: str, limit: int = 20
     ) -> list[dict[str, Any]]:
-        # FTS5 MATCH injection guard: escape FTS5 query operators so user input
-        # is treated as a literal token/phrase, not a search expression.
+        # FTS5 MATCH injection guard: _escape_fts_query strips:
+        #   - single-quote (SQL string literal injection)
+        #   - double-quote (phrase delimiter / SQL safety)
+        #   - all FTS5 operators (*+-^:(){}~)
+        #   - enforces 200-char max length
+        # LIMIT is fully parameterised (? placeholder).
         # Note: MATCH clause must use string interpolation (not ? placeholder) —
         # SQLite FTS5 does not support parameterised MATCH expressions.
         safe_q = _escape_fts_query(query)
@@ -315,3 +333,4 @@ def get_db() -> Database:
     if _db_instance is None:
         raise RuntimeError("Database not initialized — call set_db() first")
     return _db_instance
+
