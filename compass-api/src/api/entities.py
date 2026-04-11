@@ -48,7 +48,7 @@ async def _compute_score_and_refs(
 
     Returns (score_data, ref_ids).
     """
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    now = datetime.now(tz=timezone.utc).isoformat()
     refs: list[str] = []
     if content:
         refs_result = await rust_client.parse_refs(content, current_id=entity_id)
@@ -104,7 +104,7 @@ class EntityResponse(BaseModel):
 
 @router.post("", response_model=EntityResponse)
 async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) -> EntityResponse:
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = entity.vault_path
     file_path = entity.file_path or str(config.VAULT_PATH / vault_path)
 
@@ -179,7 +179,7 @@ async def update_entity(
             detail=f"ID mismatch: body has '{update.id}', URL has '{entity_id}'",
         )
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = update.vault_path
     # Preserve existing file_path when not explicitly provided in the update.
     # update.file_path=None means "don't change" (use stored value).

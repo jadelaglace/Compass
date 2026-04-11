@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -192,7 +192,7 @@ class Database:
         """Insert a reference (source→target). FK check disabled intentionally:
         target may not exist yet (forward link to future note).
         Caller manages transaction."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(tz=timezone.utc).isoformat()
         await self.conn.execute("PRAGMA foreign_keys=OFF")
         try:
             await self.conn.execute(
@@ -207,7 +207,7 @@ class Database:
         self, entity_id: str, event_type: str, trigger: Optional[str] = None
     ) -> None:
         """Log a timeline event. Caller manages transaction."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(tz=timezone.utc).isoformat()
         await self.conn.execute(
             "INSERT INTO timeline_events (entity_id, event_type, trigger, created_at) VALUES (?, ?, ?, ?)",
             (entity_id, event_type, trigger, now),
@@ -333,3 +333,4 @@ def get_db() -> Database:
     if _db_instance is None:
         raise RuntimeError("Database not initialized — call set_db() first")
     return _db_instance
+
