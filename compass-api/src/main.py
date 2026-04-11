@@ -1,5 +1,8 @@
 """Compass API — FastAPI entry point."""
+import logging
 from contextlib import asynccontextmanager
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 import uvicorn
 from fastapi import FastAPI
@@ -16,12 +19,12 @@ db = Database()
 async def lifespan(app: FastAPI):
     await db.connect()
     set_db(db)  # register the shared instance for Depends()
-    print(f"[Compass API] DB ready at {config.DB_PATH}")
-    print(f"[Compass API] Vault at {config.VAULT_PATH}")
-    print(f"[Compass API] Rust binary at {config.RUST_BINARY_PATH}")
+    logging.info(f"[Compass API] DB ready at {config.DB_PATH}")
+    logging.info(f"[Compass API] Vault at {config.VAULT_PATH}")
+    logging.info(f"[Compass API] Rust binary at {config.RUST_BINARY_PATH}")
     yield
     await db.close()
-    print("[Compass API] Shutdown complete")
+    logging.info("[Compass API] Shutdown complete")
 
 
 app = FastAPI(
