@@ -1,5 +1,6 @@
 """REST endpoints for score management."""
 from datetime import datetime, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -26,7 +27,7 @@ class ScoreResponse(BaseModel):
 
 
 @router.post("/update", response_model=ScoreResponse)
-async def update_score(update: ScoreUpdate, db: Database = Depends(get_db)) -> ScoreResponse:
+async def update_score(update: ScoreUpdate, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> ScoreResponse:
     entity = await db.get_entity(update.entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
