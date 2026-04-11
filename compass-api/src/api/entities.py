@@ -80,6 +80,8 @@ async def _compute_score_and_refs(
 
 
 class EntityCreate(BaseModel):
+    """Schema for creating a new entity via POST /entities."""
+
     id: str
     title: str
     category: str = "Inbox"
@@ -93,6 +95,8 @@ class EntityCreate(BaseModel):
 
 
 class EntityResponse(BaseModel):
+    """Schema returned after creating or fetching an entity."""
+
     id: str
     title: str
     category: str
@@ -104,6 +108,7 @@ class EntityResponse(BaseModel):
 
 @router.post("", response_model=EntityResponse)
 async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) -> EntityResponse:
+    """Create a new entity with computed score and extracted refs."""
     now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = entity.vault_path
     file_path = entity.file_path or str(config.VAULT_PATH / vault_path)
@@ -146,6 +151,7 @@ async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) ->
 
 @router.get("/search")
 async def search_entities(q: str, limit: int = 20, db: Database = Depends(get_db)) -> dict:
+    """Full-text search across entity titles and categories via FTS5."""
     results = await db.search_entities(q, limit=limit)
     return {"results": results, "count": len(results)}
 
@@ -154,6 +160,7 @@ async def search_entities(q: str, limit: int = 20, db: Database = Depends(get_db
 async def top_entities(
     limit: int = 20, category: Optional[str] = None, db: Database = Depends(get_db)
 ) -> dict:
+    """Return top-scoring entities, optionally filtered by category."""
     results = await db.get_top_entities(limit=limit, category=category)
     return {"results": results, "count": len(results)}
 
@@ -255,6 +262,7 @@ async def delete_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
 
 @router.get("/{entity_id}")
 async def get_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
+    """Fetch a single entity by ID with its incoming and outgoing references."""
     entity = await db.get_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
