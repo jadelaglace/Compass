@@ -93,7 +93,8 @@ class ParsedFile:
         consensus: float,
         content: Optional[str],
         metadata: dict,
-    ):
+    ) -> None:
+        """Initialize a parsed file with all extracted frontmatter fields."""
         self.vault_path = vault_path
         self.entity_id = entity_id
         self.title = title
@@ -218,6 +219,7 @@ class EventQueue:
     """
 
     def __init__(self, delay: float = 0.5) -> None:
+        """Initialize with coalescing delay; uses a lock for thread-safe push from watchdog."""
         self.delay = delay
         self._events: dict[str, tuple[str, float]] = {}  # path → (type, timestamp)
         self._lock = threading.Lock()
@@ -266,6 +268,7 @@ class VaultHandler(FileSystemEventHandler):
     """Watches the vault root and enqueues events for any *.md change."""
 
     def __init__(self, vault_path: Path) -> None:
+        """Initialize with resolved vault root path for event path resolution."""
         self.vault_path = vault_path.resolve()
 
     def _md_path(self, path: str) -> Optional[str]:

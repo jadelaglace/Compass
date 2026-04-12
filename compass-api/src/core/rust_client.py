@@ -12,6 +12,8 @@ from src import config as cfg
 
 @dataclass
 class ScoreResult:
+    """Result of a score computation from compass-core."""
+
     final_score: float
     decay_factor: float
     days_elapsed: float
@@ -19,6 +21,8 @@ class ScoreResult:
 
 @dataclass
 class RefsResult:
+    """Result of ref extraction from compass-core."""
+
     refs: list[str]
 
 
@@ -62,6 +66,7 @@ class RustClient:
         strategy_half_life_days: float = 365.0,
         consensus_half_life_days: float = 60.0,
     ) -> ScoreResult:
+        """Call compass-core compute_score RPC — returns ScoreResult with final score and decay data."""
         params = {
             "interest": interest,
             "strategy": strategy,
@@ -79,6 +84,7 @@ class RustClient:
         )
 
     async def parse_refs(self, content: str, current_id: Optional[str] = None) -> RefsResult:
+        """Call compass-core parse_refs RPC — extracts wiki-link refs from Markdown content."""
         params = {"content": content, "current_entity_id": current_id}
         result = await self._call("parse_refs", params)
         return RefsResult(refs=result.get("refs", []))

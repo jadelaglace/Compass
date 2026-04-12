@@ -85,19 +85,23 @@ class Database:
     """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
+        """Initialize with optional path; connection is created on connect()."""
         self.db_path = db_path or cfg.DB_PATH
         self._conn: Optional[aiosqlite.Connection] = None
 
     async def connect(self) -> None:
+        """Open the SQLite connection and initialize the schema via init_db."""
         self._conn = await init_db(self.db_path)
 
     async def close(self) -> None:
+        """Close the SQLite connection."""
         if self._conn:
             await self._conn.close()
             self._conn = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
+        """Return the active connection, raising if not yet connected."""
         if self._conn is None:
             raise RuntimeError("Database not connected — call .connect() first")
         return self._conn
@@ -241,6 +245,7 @@ class Database:
     # ---- read operations ----
 
     async def get_entity(self, entity_id: str) -> Optional[dict[str, Any]]:
+        """Fetch an entity row by ID, or None if not found."""
         async with self.conn.execute(
             "SELECT * FROM entities WHERE id = ?", (entity_id,)
         ) as cur:
@@ -250,6 +255,7 @@ class Database:
     async def search_entities(
         self, query: str, limit: int = 20
     ) -> list[dict[str, Any]]:
+        """Full-text search via FTS5 — returns ranked entity rows with scores."""
         # FTS5 MATCH injection guard: _escape_fts_query strips:
         #   - single-quote (SQL string literal injection)
         #   - double-quote (phrase delimiter / SQL safety)
@@ -277,6 +283,7 @@ class Database:
     async def get_top_entities(
         self, limit: int = 20, category: Optional[str] = None
     ) -> list[dict[str, Any]]:
+        """Return the top-scoring entities, optionally filtered by category."""
         # LEFT JOIN + ORDER BY nullable column: filter NULLs for stable sort.
         # SQLite's NULL ordering is implementation-defined; exclude rows
         # without a score to keep ordering deterministic.
@@ -324,6 +331,7 @@ _db_instance: Database | None = None
 
 
 def set_db(db: Database) -> None:
+    """Register the global Database instance for use by FastAPI's get_db dependency."""
     global _db_instance
     _db_instance = db
 

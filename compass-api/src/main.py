@@ -14,6 +14,7 @@ db = Database()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """FastAPI lifespan manager — opens DB connection on startup, closes on shutdown."""
     await db.connect()
     set_db(db)  # register the shared instance for Depends()
     print(f"[Compass API] DB ready at {config.DB_PATH}")
@@ -39,6 +40,7 @@ app.include_router(agent.router)
 
 @app.get("/health")
 async def health():
+    """Basic health check endpoint."""
     return {"status": "ok", "vault": str(config.VAULT_PATH)}
 
 

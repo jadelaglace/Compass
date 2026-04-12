@@ -12,6 +12,8 @@ router = APIRouter(prefix="/scores", tags=["scores"])
 
 
 class ScoreUpdate(BaseModel):
+    """Schema for updating an entity's interest/strategy/consensus scores."""
+
     entity_id: str
     interest: float | None = None
     strategy: float | None = None
@@ -20,6 +22,8 @@ class ScoreUpdate(BaseModel):
 
 
 class ScoreResponse(BaseModel):
+    """Score update response with computed final score and decay metadata."""
+
     entity_id: str
     final_score: float
     decay_factor: float
@@ -28,6 +32,7 @@ class ScoreResponse(BaseModel):
 
 @router.post("/update", response_model=ScoreResponse)
 async def update_score(update: ScoreUpdate, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> ScoreResponse:
+    """Recompute and persist an entity's score from updated interest/strategy/consensus values."""
     entity = await db.get_entity(update.entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
