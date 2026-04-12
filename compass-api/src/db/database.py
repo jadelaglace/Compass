@@ -85,6 +85,7 @@ class Database:
     """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
+        """Initialize with optional path; connection is created on connect()."""
         self.db_path = db_path or cfg.DB_PATH
         self._conn: Optional[aiosqlite.Connection] = None
 
