@@ -31,7 +31,7 @@ class ScoreResponse(BaseModel):
 
 
 @router.post("/update", response_model=ScoreResponse)
-async def update_score(update: ScoreUpdate, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> ScoreResponse:
+async def update_score(update: ScoreUpdate, db: Annotated[Database, Depends(get_db)] = None) -> ScoreResponse:
     """Recompute and persist an entity's score from updated interest/strategy/consensus values."""
     entity = await db.get_entity(update.entity_id)
     if not entity:
