@@ -1,7 +1,45 @@
 ---
 name: compass
 description: Access your personal knowledge graph — search, score, and navigate entities in your Compass PKM system. Use when user asks about notes, wants to find information, check scores, or manage knowledge.
----
+
+## When to Use Each Action
+
+| User Intent | Trigger Patterns | Action to Call | Response |
+|---|---|---|---|
+| **Quick capture** | Message starts with `/q`, or contains "记一下" / "存一下" / "帮我记" | `compass create` | Confirm with ID + title |
+| **Search knowledge** | Asks a knowledge question — "说说…" / "是什么…" / "介绍一下…" / "查一下…" | `compass search` | Formatted result list |
+| **Check score** | Message contains `/s` or asks "多少分" / "评分" | `compass get` | Entity detail + 3D scores |
+| **Daily feed** | Message is `/f` or "今天有什么" / "今日焦点" | `compass feed` | 3-section digest |
+| **Deep research** | Needs multiple related entities as context | `compass context` | Batch entities + suggestions |
+
+## Result Rendering Rules
+
+After calling a Compass action, format the raw JSON output into readable text — **never return raw JSON** to the user.
+
+```
+compass search → ## 搜索结果
+  1. [标题](ID) — score: X.X
+  2. ...
+
+compass feed → **今日焦点**
+  - [标题](ID) — ⭐X.X
+  **最近更新**
+  - ...
+  **战略焦点**
+  - ...
+
+compass get → **标题** (ID)
+  ⭐ 评分: interest X.X | strategy X.X | consensus X.X
+  📎 相关: [[链接列表]]
+```
+
+## Feishu Coordination
+
+- Compass result is self-contained → use `feishu.send_message` to deliver directly
+- Needs user confirmation before sending → return formatted text, let user decide
+- Uncertain or complex → return formatted text, do not auto-send
+- **Never** send raw JSON to Feishu
+
 
 # Compass — Personal Knowledge Graph Skill
 
