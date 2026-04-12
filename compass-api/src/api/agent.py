@@ -1,4 +1,5 @@
 """Agent-facing endpoints — context injection and tool interfaces."""
+from typing import Annotated
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
@@ -24,7 +25,7 @@ class ContextResponse(BaseModel):
 
 
 @router.post("/context", response_model=ContextResponse)
-async def get_context(req: ContextRequest, db: Database = Depends(get_db)) -> ContextResponse:
+async def get_context(req: ContextRequest, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> ContextResponse:
     """Search and score entities as context for an agent task."""
     candidates = await db.search_entities(req.task, limit=req.top_k * 2)
     if not candidates:

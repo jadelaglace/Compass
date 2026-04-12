@@ -1,6 +1,6 @@
 """REST endpoints for entity management."""
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -107,7 +107,7 @@ class EntityResponse(BaseModel):
 
 
 @router.post("", response_model=EntityResponse)
-async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) -> EntityResponse:
+async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> EntityResponse:
     """Create a new entity with computed score and extracted refs."""
     now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = entity.vault_path
@@ -150,7 +150,7 @@ async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) ->
 
 
 @router.get("/search")
-async def search_entities(q: str, limit: int = 20, db: Database = Depends(get_db)) -> dict:
+async def search_entities(q: str, limit: int = 20, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> dict:
     """Full-text search across entity titles and categories via FTS5."""
     results = await db.search_entities(q, limit=limit)
     return {"results": results, "count": len(results)}
@@ -158,7 +158,7 @@ async def search_entities(q: str, limit: int = 20, db: Database = Depends(get_db
 
 @router.get("/top")
 async def top_entities(
-    limit: int = 20, category: Optional[str] = None, db: Database = Depends(get_db)
+    limit: int = 20, category: Optional[str] = None, db: Annotated[Database, Depends(get_db)] = Depends(get_db)
 ) -> dict:
     """Return top-scoring entities, optionally filtered by category."""
     results = await db.get_top_entities(limit=limit, category=category)
@@ -169,7 +169,7 @@ async def top_entities(
 async def update_entity(
     entity_id: str,
     update: EntityCreate,
-    db: Database = Depends(get_db)
+    db: Annotated[Database, Depends(get_db)] = Depends(get_db)
 ) -> EntityResponse:
     """Full update: re-parses content for refs, recomputes scores.
 
@@ -237,7 +237,7 @@ async def update_entity(
 
 
 @router.delete("/{entity_id}")
-async def delete_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
+async def delete_entity(entity_id: str, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> dict:
     """Delete entity and all associated data (scores, refs, events).
 
     Used by FileWatcher when a vault file is removed.
@@ -261,7 +261,7 @@ async def delete_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
 
 
 @router.get("/{entity_id}")
-async def get_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
+async def get_entity(entity_id: str, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> dict:
     """Fetch a single entity by ID with its incoming and outgoing references."""
     entity = await db.get_entity(entity_id)
     if not entity:
