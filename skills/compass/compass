@@ -167,6 +167,146 @@ def action_score(params: dict) -> None:
     print(json.dumps(result, indent=2))
 
 
+def _render_search(data: dict) -> str:
+    results = data.get("results", [])
+    if not results:
+        return "没有找到相关结果。"
+    lines = []
+    for i, ent in enumerate(results, 1):
+        score = ent.get("final_score", 0)
+        title = ent.get("title", ent.get("entity_id", "?"))
+        eid = ent.get("entity_id", "")
+        cat = ent.get("category", "")
+        lines.append(f"{i}. [{title}]({eid}) — ⭐{score:.1f}分  [{cat}]")
+    return "## 搜索结果\n" + "\n".join(lines)
+
+
+def _render_top(data: dict) -> str:
+    results = data.get("results", [])
+    if not results:
+        return "没有找到结果。"
+    lines = []
+    for i, ent in enumerate(results, 1):
+        score = ent.get("final_score", 0)
+        title = ent.get("title", ent.get("entity_id", "?"))
+        eid = ent.get("entity_id", "")
+        lines.append(f"{i}. [{title}]({eid}) — ⭐{score:.1f}分")
+    return "## Top " + str(len(results)) + "\n" + "\n".join(lines)
+
+
+def _render_get(data: dict) -> str:
+    title = data.get("title", "?")
+    eid = data.get("entity_id", "?")
+    cat = data.get("category", "?")
+    scores = data.get("scores", {})
+    interest = scores.get("interest", 0)
+    strategy = scores.get("strategy", 0)
+    consensus = scores.get("consensus", 0)
+    final = data.get("final_score", 0)
+
+    outgoing = data.get("outgoing_refs", [])
+    incoming = data.get("incoming_refs", [])
+
+    parts = [f"## {title} ({eid})", f"分类：{cat}", f"⭐ 评分：{final:.1f}（interest {interest:.1f} / strategy {strategy:.1f} / consensus {consensus:.1f}）"]
+
+    if outgoing:
+        refs = ", ".join(f"[[{r}]]" for r in outgoing)
+        parts.append(f"→ 引用：{refs}")
+    if incoming:
+        refs = ", ".join(f"[[{r}]]" for r in incoming)
+        parts.append(f"← 被引用：{refs}")
+
+    return "\n".join(parts)
+
+
+def _render_feed(data: dict) -> str:
+    lines = ["**今日焦点**"]
+    for ent in data.get("top_inbox", [])[:3]:
+        title = ent.get("title", "?")
+        eid = ent.get("entity_id", "?")
+        score = ent.get("final_score", 0)
+        lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
+
+    lines.append("**最近更新**")
+    for ent in data.get("recently_updated", [])[:3]:
+        title = ent.get("title", "?")
+        eid = ent.get("entity_id", "?")
+        score = ent.get("final_score", 0)
+        lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
+
+    lines.append("**战略焦点**")
+    for ent in data.get("strategic", [])[:3]:
+        title = ent.get("title", "?")
+        eid = ent.get("entity_id", "?")
+        score = ent.get("final_score", 0)
+        lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
+
+    return "\n".join(lines)
+
+
+def _render_context(data: dict) -> str:
+    ctx = data.get("context", [])
+    if not ctx:
+        return "没有找到相关上下文。"
+    lines = ["## 上下文"]
+    for ent in ctx:
+        title = ent.get("title", "?")
+        eid = ent.get("entity_id", "?")
+        summary = ent.get("content", "")[:100]
+        score = ent.get("final_score", 0)
+        lines.append(f"- [{title}]({eid})：{summary}... ⭐{score:.1f}")
+    reasoning = data.get("reasoning", "")
+    if reasoning:
+        lines.append(f"\n推理：{reasoning}")
+    return "\n".join(lines)
+
+
+def _render_create(data: dict) -> str:
+    title = data.get("title", "?")
+    eid = data.get("entity_id", "?")
+    return f"✅ 已创建：[{title}]({eid})"
+
+
+def _render_score(data: dict) -> str:
+    title = data.get("title", "?")
+    eid = data.get("entity_id", "?")
+    score = data.get("final_score", 0)
+    return f"✅ 评分已更新：[{title}]({eid}) — ⭐{score:.1f}"
+
+
+def action_render(params: dict) -> None:
+    raw = params.get("raw")
+    action_name = params.get("action")
+    if not raw:
+        print(json.dumps({"error": "raw is required"}), file=sys.stderr)
+        sys.exit(1)
+    if not action_name:
+        print(json.dumps({"error": "action is required"}), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(json.dumps({"error": f"invalid JSON: {e}"}), file=sys.stderr)
+        sys.exit(1)
+
+    renderers = {
+        "search": _render_search,
+        "top": _render_top,
+        "get": _render_get,
+        "feed": _render_feed,
+        "context": _render_context,
+        "create": _render_create,
+        "score": _render_score,
+    }
+
+    if action_name not in renderers:
+        print(json.dumps({"error": f"unknown action: {action_name}", "available": list(renderers.keys())}), file=sys.stderr)
+        sys.exit(1)
+
+    print(renderers[action_name](data))
+
+
 # ---- Dispatch ----
 
 
@@ -178,6 +318,7 @@ ACTIONS = {
     "context": action_context,
     "create": action_create,
     "score": action_score,
+    "render": action_render,
 }
 
 
