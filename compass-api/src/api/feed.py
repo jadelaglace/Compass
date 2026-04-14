@@ -17,7 +17,7 @@ class FeedResponse(BaseModel):
 
 
 @router.get("/today", response_model=FeedResponse)
-async def daily_feed(limit: int = 10, db: Annotated[Database, Depends(get_db)] = Depends(get_db)) -> FeedResponse:
+async def daily_feed(limit: int = 10, db: Annotated[Database, Depends(get_db)] = None) -> FeedResponse:
     """Return the daily digest: top Inbox items, recently updated, and strategic items."""
     top_inbox = await db.get_top_entities(limit=limit, category="Inbox")
     recently = await db.get_top_entities(limit=limit)
