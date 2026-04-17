@@ -22,7 +22,8 @@
 
 | 文档 | 说明 |
 |------|------|
-| [docs/PRD.md](docs/PRD.md) | **产品需求文档** — 产品/CEO 输出，定义做什么、为什么、不做什么 |
+| [docs/PRD_v2.md](docs/PRD_v2.md) | **产品需求文档 v2.0** — Phase 1 完成状态 + PCOS/PKM 砍掉功能全量列表 + Phase 2 详细计划 |
+| [docs/PRD.md](docs/PRD.md) | 产品需求文档 v1.0 — Phase 1 原始规划（存档） |
 | [OPENCLAW.md](OPENCLAW.md) | **架构决策** — 技术选型、Phase 规划、竞品分析 |
 | [archive/](archive/) | 历史文档 — 规划A/B 版本归档 |
 
