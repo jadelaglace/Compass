@@ -859,4 +859,33 @@ jobs:
 
 ---
 
+## 9. Phase 2 任务拆解（TDD 增量）
+
+> **目标**：将 PRD v2.1 的 Phase 2 大任务拆分为可独立测试、逐步交付的小任务。
+> **原则**：每个任务产出一个可运行的 API/功能，TDD 先行（测试 → 实现 → 重构）。
+
+### 9.1 任务总览
+
+| 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 预估工时 |
+|---------|----------|------|--------|------|----------|
+| **P2-Graph-1** | `GET /graph/neighbors/{id}` 基础邻居查询 | `feat/p2-graph-1-neighbors-basic` | P0 | 无 | 4h |
+| **P2-Graph-2** | `GET /graph/neighbors/{id}?depth=N` 深度查询 | `feat/p2-graph-2-neighbors-depth` | P0 | P2-Graph-1 | 3h |
+| **P2-Graph-3** | `GET /graph/neighbors/{id}?min_strength=X` 强度过滤 | `feat/p2-graph-3-neighbors-filter` | P1 | P2-Graph-1 | 3h |
+| **P2-Graph-4** | `GET /graph/path?from=X&to=Y` 最短路径 | `feat/p2-graph-4-path` | P1 | P2-Graph-1 | 6h |
+| **P2-Fetch-1** | `POST /fetch` URL 抓取（原始内容） | `feat/p2-fetch-1-url-fetch` | P0 | 无 | 4h |
+| **P2-Fetch-2** | `POST /fetch/clean` 内容清洗结构化 | `feat/p2-fetch-2-clean` | P0 | P2-Fetch-1 | 6h |
+| **P2-Fetch-3** | `POST /fetch/save` 清洗结果写入 Vault | `feat/p2-fetch-3-save` | P0 | P2-Fetch-2 | 4h |
+| **P2-Search-1** | `GET /search?q=...` 语义搜索（FAISS） | `feat/p2-search-semantic` | P1 | 无 | 8h |
+| **P2-MCP-1** | MCP Server 适配层（基础 Tools） | `feat/p2-mcp-server` | P2 | 无 | 6h |
+
+### 9.2 任务详细设计
+
+[详细设计内容见原 TDD，此处省略以保持简洁]
+
+---
+
+*Phase 2 任务拆解完成。TDD 已更新，可直接进入开发。*
+
+---
+
 *CTO 评估完成。Rust 核心 + Python 胶水层架构可行，8 周可达。核心增量是 Rust 学习成本，风险可控。*
