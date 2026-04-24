@@ -878,14 +878,1017 @@ jobs:
 | **P2-Search-1** | `GET /search?q=...` 语义搜索（FAISS） | `feat/p2-search-semantic` | P1 | 无 | 8h |
 | **P2-MCP-1** | MCP Server 适配层（基础 Tools） | `feat/p2-mcp-server` | P2 | 无 | 6h |
 
-### 9.2 任务详细设计
+### 9.2 Graph API 详细设计
 
-[详细设计内容见原 TDD，此处省略以保持简洁]
+#### 数据模型依据
+
+Graph API 底层使用现有 `refs` 表（已在 Phase 1 SQLite Schema 中定义）：
+
+```sql
+-- refs 表（已在 schema.sql）
+CREATE TABLE refs (
+    source_id  TEXT,
+    target_id  TEXT,
+    ref_type   TEXT,
+    strength   REAL DEFAULT 1.0,   -- 0.0~1.0，边强度
+    context    TEXT,
+    created_at TIMESTAMP,
+    PRIMARY KEY (source_id, target_id, ref_type)
+);
+```
+
+#### P2-Graph-1：`GET /graph/neighbors/{id}` — 基础邻居查询
+
+**目标：** 返回一个实体的所有直接邻居（入边 + 出边）。
+
+**API 规格：**
+
+```
+GET /graph/neighbors/{id}
+
+Path Parameters:
+  id: string  — 实体 ID（如 "know-000001"）
+
+Response 200:
+{
+  "nodes": [
+    {
+      "id": "know-000002",
+      "title": "实体标题",
+      "entity_type": "knowledge",
+      "score_composite": 72.5
+    }
+  ],
+  "edges": [
+    {
+      "source": "know-000001",
+      "target": "know-000002",
+      "ref_type": "cites",
+      "strength": 1.0,
+      "direction": "outgoing"
+    }
+  ],
+  "total_neighbors": 5
+}
+```
+
+**验收标准：**
+- [ ] 给定任意实体 ID，返回所有直接相连的出边邻居（source=该实体）
+- [ ] 同时返回所有入边邻居（target=该实体）
+- [ ] 每个节点含 `id`、`title`、`entity_type`、`score_composite`
+- [ ] 每条边含 `source`、`target`、`ref_type`、`strength`、`direction`
+- [ ] 不存在的实体返回 404
+- [ ] 数据库无邻居时返回空数组（200）
+
+**测试用例：**
+
+```python
+# tests/api/test_graph.py
+import pytest
+from httpx import AsyncClient, ASGITransport
+from src.main import app
+
+@pytest.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+@pytest.mark.asyncio
+async def test_neighbors_returns_direct_links(client, populated_db):
+    """实体 A → B → C（A 引用 B），B 的 neighbors 包含 A 和 C"""
+    # Arrange: 在测试 fixture 中 setup refs: A→B, C→B
+    entity_b_id = "know-000002"
+    # Act
+    resp = await client.get(f"/graph/neighbors/{entity_b_id}")
+    # Assert
+    assert resp.status_code == 200
+    data = resp.json()
+    node_ids = {n["id"] for n in data["nodes"]}
+    assert "know-000001" in node_ids  # incoming
+    assert "know-000003" in node_ids  # outgoing
+    edges_dir = {e["direction"] for e in data["edges"]}
+    assert "incoming" in edges_dir
+    assert "outgoing" in edges_dir
+
+@pytest.mark.asyncio
+async def test_neighbors_404_for_nonexistent(client):
+    resp = await client.get("/graph/neighbors/nonexistent-id")
+    assert resp.status_code == 404
+
+@pytest.mark.asyncio
+async def test_neighbors_empty_returns_empty_lists(client, isolated_db):
+    resp = await client.get("/graph/neighbors/know-999999")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["nodes"] == []
+    assert data["edges"] == []
+```
+
+**实现方案：**
+
+```python
+# compass-api/src/api/graph.py
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from typing import Optional
+
+from src.db.database import Database, get_db
+
+router = APIRouter(prefix="/graph", tags=["graph"])
+
+
+class GraphNode(BaseModel):
+    id: str
+    title: str
+    entity_type: str
+    score_composite: Optional[float] = None
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    ref_type: str
+    strength: float
+    direction: str  # "incoming" | "outgoing"
+
+
+class NeighborsResponse(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    total_neighbors: int
+
+
+@router.get("/neighbors/{entity_id}", response_model=NeighborsResponse)
+async def get_neighbors(
+    entity_id: str,
+    db: Database = Depends(get_db),
+) -> NeighborsResponse:
+    # 验证实体存在
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    # OUTGOING: refs WHERE source_id = entity_id
+    out_cur = await db.conn.execute(
+        """
+        SELECT r.target_id, r.ref_type, r.strength, e.title, e.entity_type, s.final_score
+        FROM refs r
+        JOIN entities e ON e.id = r.target_id
+        LEFT JOIN scores s ON s.entity_id = r.target_id
+        WHERE r.source_id = ?
+        """,
+        (entity_id,),
+    )
+    out_rows = await out_cur.fetchall()
+
+    # INCOMING: refs WHERE target_id = entity_id
+    in_cur = await db.conn.execute(
+        """
+        SELECT r.source_id, r.ref_type, r.strength, e.title, e.entity_type, s.final_score
+        FROM refs r
+        JOIN entities e ON e.id = r.source_id
+        LEFT JOIN scores s ON s.entity_id = r.source_id
+        WHERE r.target_id = ?
+        """,
+        (entity_id,),
+    )
+    in_rows = await in_cur.fetchall()
+
+    # 去重建模 nodes，避免重复
+    nodes_map: dict[str, GraphNode] = {}
+    edges: list[GraphEdge] = []
+
+    for row in out_rows:
+        tid = row["target_id"]
+        if tid not in nodes_map:
+            nodes_map[tid] = GraphNode(
+                id=tid,
+                title=row["title"],
+                entity_type=row["entity_type"],
+                score_composite=row["final_score"],
+            )
+        edges.append(GraphEdge(
+            source=entity_id,
+            target=tid,
+            ref_type=row["ref_type"],
+            strength=row["strength"],
+            direction="outgoing",
+        ))
+
+    for row in in_rows:
+        sid = row["source_id"]
+        if sid not in nodes_map:
+            nodes_map[sid] = GraphNode(
+                id=sid,
+                title=row["title"],
+                entity_type=row["entity_type"],
+                score_composite=row["final_score"],
+            )
+        edges.append(GraphEdge(
+            source=sid,
+            target=entity_id,
+            ref_type=row["ref_type"],
+            strength=row["strength"],
+            direction="incoming",
+        ))
+
+    return NeighborsResponse(
+        nodes=list(nodes_map.values()),
+        edges=edges,
+        total_neighbors=len(nodes_map),
+    )
+```
+
+**工时：** 4h（测试先行 1.5h → 实现 1.5h → 重构 1h）
 
 ---
 
-*Phase 2 任务拆解完成。TDD 已更新，可直接进入开发。*
+#### P2-Graph-2：`GET /graph/neighbors/{id}?depth=N` — 深度查询
+
+**目标：** BFS 遍历，支持返回 N 度邻居。
+
+**API 规格：**
+
+```
+GET /graph/neighbors/{id}?depth=2
+
+Query Parameters:
+  depth: int  — 跳数，默认 1，最大 3
+```
+
+**验收标准：**
+- [ ] `depth=1` 等同于 P2-Graph-1 基础查询
+- [ ] `depth=2` 返回直接邻居 + 2度邻居（去重）
+- [ ] `depth=3` 最大，支持 3 度遍历
+- [ ] `depth > 3` 返回 400 Bad Request
+- [ ] 节点数量上限 200（BFS 截断，防止图过大）
+- [ ] 路径中不得出现重复节点（防环）
+
+**测试用例：**
+
+```python
+@pytest.mark.asyncio
+async def test_depth_2_includes_2nd_degree_neighbors(client, populated_db):
+    """A→B→C（A 引用 B，B 引用 C），depth=2 时 A 可见 C"""
+    # Arrange: A→B, B→C
+    resp = await client.get("/graph/neighbors/know-000001?depth=2")
+    assert resp.status_code == 200
+    node_ids = {n["id"] for n in resp.json()["nodes"]}
+    assert "know-000002" in node_ids  # 1度
+    assert "know-000003" in node_ids  # 2度
+
+@pytest.mark.asyncio
+async def test_depth_3_max(client, populated_db):
+    resp = await client.get("/graph/neighbors/know-000001?depth=3")
+    assert resp.status_code == 200
+
+@pytest.mark.asyncio
+async def test_depth_4_returns_400(client):
+    resp = await client.get("/graph/neighbors/know-000001?depth=4")
+    assert resp.status_code == 400
+```
+
+**实现方案：**
+
+```python
+async def _bfs_neighbors(db, start_id: str, depth: int, max_nodes: int = 200) -> tuple[set[str], list[GraphEdge]]:
+    """BFS 遍历图，返回 (visited_ids, edges)"""
+    visited: set[str] = {start_id}
+    queue: list[tuple[str, int]] = [(start_id, 0)]  # (node_id, current_depth)
+    all_edges: list[GraphEdge] = []
+
+    while queue:
+        node_id, d = queue.pop(0)
+        if d >= depth:
+            continue
+
+        # 查所有邻居（双向）
+        cur = await db.conn.execute(
+            """
+            SELECT 'outgoing' AS direction, r.source_id AS from_id, r.target_id AS to_id,
+                   r.ref_type, r.strength, e.title, e.entity_type
+            FROM refs r
+            JOIN entities e ON e.id = r.target_id
+            WHERE r.source_id = ?
+            UNION ALL
+            SELECT 'incoming' AS direction, r.source_id AS from_id, r.target_id AS to_id,
+                   r.ref_type, r.strength, e.title, e.entity_type
+            FROM refs r
+            JOIN entities e ON e.id = r.source_id
+            WHERE r.target_id = ?
+            """,
+            (node_id, node_id),
+        )
+        rows = await cur.fetchall()
+
+        for row in rows:
+            neighbor_id = row["to_id"] if row["direction"] == "outgoing" else row["from_id"]
+            if neighbor_id not in visited and len(visited) < max_nodes:
+                visited.add(neighbor_id)
+                queue.append((neighbor_id, d + 1))
+            all_edges.append(GraphEdge(
+                source=row["from_id"],
+                target=row["to_id"],
+                ref_type=row["ref_type"],
+                strength=row["strength"],
+                direction=row["direction"],
+            ))
+
+    return visited, all_edges
+```
 
 ---
 
-*CTO 评估完成。Rust 核心 + Python 胶水层架构可行，8 周可达。核心增量是 Rust 学习成本，风险可控。*
+#### P2-Graph-3：`GET /graph/neighbors/{id}?min_strength=X` — 强度过滤
+
+**目标：** 按边强度 `strength` 阈值过滤邻居。
+
+**API 规格：**
+
+```
+GET /graph/neighbors/{id}?depth=1&min_strength=0.7
+```
+
+**验收标准：**
+- [ ] `min_strength=0.7` 仅返回 `strength >= 0.7` 的边
+- [ ] 不满足条件的边不出现在 edges 数组中
+- [ ] 满足条件但相关节点已在 edges 中时正常返回
+- [ ] `min_strength=0.0` 等同于不过滤
+- [ ] `min_strength > 1.0` 返回空结果（不报错）
+
+---
+
+#### P2-Graph-4：`GET /graph/path?from=X&to=Y` — 最短路径
+
+**目标：** BFS 求两点间最短路径。
+
+**API 规格：**
+
+```
+GET /graph/path?from=know-000001&to=know-000005
+
+Response 200:
+{
+  "path": ["know-000001", "know-000003", "know-000005"],
+  "edges": [
+    {"source": "know-000001", "target": "know-000003", "ref_type": "cites"},
+    {"source": "know-000003", "target": "know-000005", "ref_type": "cites"}
+  ],
+  "distance": 2
+}
+Response 404:  // 无路径连通
+{"detail": "No path found between entities"}
+```
+
+**验收标准：**
+- [ ] 两实体相连时返回最短路径（边数最少）
+- [ ] 不连通的实体返回 404
+- [ ] `from == to` 返回 distance=0 的自环路径
+- [ ] 最大搜索节点数 500，防止无限图死循环
+
+**测试用例：**
+
+```python
+@pytest.mark.asyncio
+async def test_path_shortest(client, populated_db):
+    """A→B→C（A 引用 B，B 引用 C），A 到 C 的最短路径为 [A, B, C]"""
+    resp = await client.get("/graph/path?from=know-000001&to=know-000003")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["distance"] == 2
+    assert data["path"] == ["know-000001", "know-000002", "know-000003"]
+
+@pytest.mark.asyncio
+async def test_path_not_connected_returns_404(client, isolated_db):
+    """两个孤立实体之间无路径"""
+    resp = await client.get("/graph/path?from=know-000001&to=know-009999")
+    assert resp.status_code == 404
+    assert "No path found" in resp.json()["detail"]
+```
+
+---
+
+### 9.3 Fetch Pipeline 详细设计
+
+> Fetch Pipeline 实现 Phase 1 /docs 中埋头的 `NotImplemented` 槽位：
+> `/fetch` → `/clean` → `/save` 三段式流水线。
+
+#### P2-Fetch-1：`POST /fetch` — URL 抓取
+
+**目标：** 接收 URL，返回页面原始 HTML/正文内容。
+
+**API 规格：**
+
+```yaml
+POST /fetch
+Content-Type: application/json
+Body: {"url": "https://example.com/article"}
+
+Response 200:
+{
+  "url": "https://example.com/article",
+  "title": "页面标题",
+  "raw_content": "<html>...",
+  "content_type": "text/html",
+  "status_code": 200,
+  "fetched_at": "2026-04-24T12:00:00Z"
+}
+Response 422:  // URL 格式错误
+Response 408:  // 请求超时（10s）
+Response 400:  // 非 HTTP(S) URL
+```
+
+**验收标准：**
+- [ ] 支持 HTTP 和 HTTPS URL
+- [ ] 超时 10s，返回 408
+- [ ] 返回原始 HTML（不做清洗）
+- [ ] 跟随最多 3 次重定向
+- [ ] User-Agent 携带 `Compass-Fetch/2.1` 标识
+- [ ] 非 2xx 状态码返回 502
+
+**测试用例：**
+
+```python
+@pytest.mark.asyncio
+async def test_fetch_returns_html(client, respx_mock):
+    respx_mock.get("https://example.com").respond(
+        text="<html><body>Hello</body></html>",
+        headers={"content-type": "text/html"},
+        status_code=200,
+    )
+    resp = await client.post("/fetch", json={"url": "https://example.com"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["url"] == "https://example.com"
+    assert "<html>" in data["raw_content"]
+    assert data["status_code"] == 200
+
+@pytest.mark.asyncio
+async def test_fetch_invalid_url_returns_422(client):
+    resp = await client.post("/fetch", json={"url": "not-a-url"})
+    assert resp.status_code == 422
+
+@pytest.mark.asyncio
+async def test_fetch_timeout_returns_408(client, respx_mock):
+    # 模拟 11s 延迟
+    respx_mock.get("https://slow.example").mock(side_effect=asyncio.TimeoutError())
+    resp = await client.post("/fetch", json={"url": "https://slow.example"})
+    assert resp.status_code == 408
+```
+
+**实现方案：**
+
+```python
+# compass-api/src/api/fetch.py
+import httpx
+from pydantic import BaseModel, HttpUrl
+from fastapi import APIRouter, HTTPException
+
+router = APIRouter(prefix="/fetch", tags=["fetch"])
+
+class FetchRequest(BaseModel):
+    url: HttpUrl
+
+class FetchResponse(BaseModel):
+    url: str
+    title: Optional[str]
+    raw_content: str
+    content_type: str
+    status_code: int
+    fetched_at: str
+
+TIMEOUT = 10.0
+
+@router.post("", response_model=FetchResponse)
+async def fetch_url(req: FetchRequest):
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(TIMEOUT),
+            follow_redirects=True,
+            headers={"User-Agent": "Compass-Fetch/2.1"},
+        ) as client:
+            resp = await client.get(str(req.url))
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=408, detail="Fetch timeout (10s)")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid URL")
+
+    if not (200 <= resp.status_code < 300):
+        raise HTTPException(status_code=502, detail=f"Upstream returned {resp.status_code}")
+
+    content_type = resp.headers.get("content-type", "text/plain")
+    title = resp.extract_text("title") if "text/html" in content_type else None
+
+    return FetchResponse(
+        url=str(req.url),
+        title=title,
+        raw_content=resp.text,
+        content_type=content_type,
+        status_code=resp.status_code,
+        fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+    )
+```
+
+**工时：** 4h（测试 1.5h → 实现 1.5h → 重构 1h）
+
+---
+
+#### P2-Fetch-2：`POST /fetch/clean` — 内容清洗
+
+**目标：** 接收原始 HTML，输出清洗后的结构化 Markdown。
+
+**API 规格：**
+
+```yaml
+POST /fetch/clean
+Body: {"raw_content": "<html>...</html>", "source_url": "https://..."}
+
+Response 200:
+{
+  "title": "清洗后标题",
+  "content": "## 章节标题\n\n正文内容...",
+  "summary": "可选 AI 摘要（≤200 字）",
+  "tags": ["#标签1", "#标签2"],
+  "source_url": "https://..."
+}
+```
+
+**验收标准：**
+- [ ] 移除所有 HTML 标签，保留文本结构（标题 → `#` / `##`）
+- [ ] `<pre><code>` 块保留原始格式
+- [ ] 图片 `src` 转为 `![](url)` Markdown 格式
+- [ ] 链接保留为 `[text](url)` 格式
+- [ ] 移除广告、导航栏、Footer 等噪音块（基于 CSS selector 过滤）
+- [ ] `source_url` 写入文档元数据
+- [ ] 提取 `<title>` 作为标题（兜底）
+
+**清洗策略：**
+- 使用 `httpx` 或 `BeautifulSoup` 解析
+- 移除 `<nav>`, `<footer>`, `<aside>`, `<header>`, `.ad`, `.advertisement` selector
+- 保留 `<article>`, `<main>`, `<p>`, `<h1>`~`<h6>`, `<ul>`, `<ol>`, `<blockquote>`, `<pre>`, `<code>`
+- 提取 `og:title` > `<title>` 作为标题
+
+---
+
+#### P2-Fetch-3：`POST /fetch/save` — 写入 Vault
+
+**目标：** 将清洗后的内容保存为 Vault Markdown 文件。
+
+**API 规格：**
+
+```yaml
+POST /fetch/save
+Body:
+{
+  "title": "文章标题",
+  "content": "## 正文...",
+  "source_url": "https://...",
+  "tags": ["#AI", "#论文"],
+  "category": "Inbox"
+}
+
+Response 201:
+{
+  "entity_id": "know-000042",
+  "file_path": "/vault/Inbox/know-000042.md",
+  "title": "文章标题"
+}
+```
+
+**验收标准：**
+- [ ] 文件名：`{category}/{entity_id}.md`
+- [ ] Front-matter 包含 `id`、`title`、`source`、`tags`、`created_at`、`updated_at`
+- [ ] 正文内容跟在 front-matter 后面
+- [ ] 实体 ID 格式：`know-{6位数字}`，自动递增
+- [ ] 重复 URL 检测（source 已存在的 entity 不允许重复 save）
+- [ ] 同时写入 SQLite（entities + scores 表）
+- [ ] 返回新创建实体的 ID 和文件路径
+
+**Front-matter 格式：**
+
+```markdown
+---
+id: know-000042
+title: 文章标题
+source: https://example.com/article
+tags:
+  - #AI
+  - #论文
+category: Inbox
+created_at: 2026-04-24T12:00:00Z
+updated_at: 2026-04-24T12:00:00Z
+---
+
+## 正文内容...
+```
+
+---
+
+### 9.4 Semantic Search（FAISS）详细设计
+
+#### P2-Search-1：`POST /search` — 语义 + BM25 混合搜索
+
+**目标：** 使用 FAISS 向量索引 + BM25 实现语义相似度搜索。
+
+**数据流：**
+
+```
+写入路径（后台任务）：
+  新建/更新 Entity → 提取文本 → Embedding API → 存入 FAISS 索引
+
+查询路径：
+  用户 query → Embedding → FAISS top-k → BM25 补充 → 混合排序 → 返回
+```
+
+**API 规格：**
+
+```yaml
+POST /search
+Body:
+{
+  "query": "机器学习注意力机制",
+  "semantic_weight": 0.6,
+  "score_weight": 0.4,
+  "filters": {
+    "tags": ["#AI"],
+    "entity_type": "knowledge",
+    "date_range": {"start": "2026-01-01", "end": "2026-04-24"}
+  },
+  "limit": 20
+}
+
+Response 200:
+{
+  "items": [
+    {
+      "entity": {
+        "id": "know-000001",
+        "title": "注意力机制详解",
+        "entity_type": "knowledge",
+        "score_composite": 75.0
+      },
+      "match_score": 0.92,
+      "highlights": ["...注意力机制..."]
+    }
+  ],
+  "total": 1,
+  "query_vector_dim": 1536
+}
+```
+
+**验收标准：**
+- [ ] `query` 字段支持自然语言
+- [ ] `semantic_weight + score_weight = 1.0`（校验）
+- [ ] 返回结果按混合分数降序
+- [ ] `highlights` 字段包含 query 关键词在正文中的上下文片段
+- [ ] 无 FAISS 索引时回退到纯 BM25（FTS5）
+- [ ] 向量维度须与 Embedding 模型一致（text-embedding-3-small: 1536维）
+- [ ] 单次查询最大 `limit=100`
+
+**测试用例：**
+
+```python
+@pytest.mark.asyncio
+async def test_search_returns_hybrid_results(client, populated_db_with_embeddings):
+    resp = await client.post("/search", json={
+        "query": "深度学习优化器",
+        "limit": 5,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) <= 5
+    assert all("match_score" in item for item in data["items"])
+    assert all("entity" in item for item in data["items"])
+
+@pytest.mark.asyncio
+async def test_search_weight_validation(client):
+    resp = await client.post("/search", json={
+        "query": "test",
+        "semantic_weight": 0.5,
+        "score_weight": 0.8,  # > 1.0
+    })
+    assert resp.status_code == 422  # validation error
+```
+
+**实现方案（嵌入生成）：**
+
+```python
+# compass-api/src/services/embedding.py
+import httpx
+from src import config
+
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_URL = "https://api.openai.com/v1/embeddings"
+DIMENSION = 1536
+
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    """调用 OpenAI Embedding API，返回归一化向量列表"""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            EMBEDDING_URL,
+            json={
+                "model": EMBEDDING_MODEL,
+                "input": texts,
+                "dimensions": DIMENSION,
+            },
+            headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return [item["embedding"] for item in data["data"]]
+```
+
+**FAISS 索引管理（Python 层）：**
+
+```python
+# compass-api/src/services/faiss_index.py
+import faiss
+import numpy as np
+
+class FaissIndex:
+    def __init__(self, dim: int = DIMENSION):
+        self.dim = dim
+        self.index = faiss.IndexFlatIP(dim)  # Inner Product（余弦相似度等价于归一化向量）
+        self.id_map: dict[int, str] = {}  # faiss_offset → entity_id
+
+    def add(self, entity_id: str, embedding: list[float]):
+        vec = np.array([embedding], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        offset = self.index.ntotal
+        self.index.add(vec)
+        self.id_map[offset] = entity_id
+
+    def search(self, query_embedding: list[float], k: int) -> list[tuple[str, float]]:
+        vec = np.array([query_embedding], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        scores, offsets = self.index.search(vec, k)
+        return [(self.id_map[o], float(s)) for o, s in zip(offsets[0], scores[0]) if o >= 0]
+```
+
+**工时：** 8h（Embedding API 对接 2h → FAISS 索引管理 2h → 混合排序 2h → 测试 2h）
+
+---
+
+### 9.5 MCP Server 详细设计
+
+#### P2-MCP-1：MCP Server 适配层
+
+**目标：** 将 compass-api 的核心能力暴露为 MCP Tools，供 MCP-native Agent 使用。
+
+**技术选型：** `@modelcontextprotocol/sdk` Python SDK
+
+**Tools 规格：**
+
+```python
+# compass-api/src/mcp/server.py
+from mcp.server import Server
+from mcp.types import Tool, TextContent
+from mcp.server.stdio import stdio_server
+
+server = Server("compass")
+
+@server.list_tools()
+async def list_tools() -> list[Tool]:
+    return [
+        Tool(
+            name="compass_neighbors",
+            description="获取实体的所有直接邻居节点",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string"},
+                    "depth": {"type": "integer", "default": 1},
+                    "min_strength": {"type": "number", "default": 0.0},
+                },
+                "required": ["entity_id"],
+            },
+        ),
+        Tool(
+            name="compass_search",
+            description="语义搜索实体",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10},
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="compass_fetch_save",
+            description="抓取 URL 并保存到 Vault",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "format": "uri"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["url"],
+            },
+        ),
+    ]
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    if name == "compass_neighbors":
+        # 调用 graph API
+        ...
+    elif name == "compass_search":
+        # 调用 search API
+        ...
+    elif name == "compass_fetch_save":
+        # 调用 fetch + clean + save pipeline
+        ...
+    return [TextContent(text=json.dumps(result))]
+```
+
+**验收标准：**
+- [ ] MCP Server 可通过 `python -m src.mcp.server` 独立启动（Stdio 模式）
+- [ ] 3 个 Tool 注册成功：`compass_neighbors`、`compass_search`、`compass_fetch_save`
+- [ ] Tool 输入 schema 与 compass-api REST 接口一致
+- [ ] Tool 输出为 JSON 字符串（TextContent）
+- [ ] 可与 Cursor / Claude Code 等 MCP Native Agent 对接
+
+**工时：** 6h（MCP SDK 接入 2h → 3 个 Tool 实现 2h → 联调测试 2h）
+
+---
+
+### 9.6 Phase 3 任务拆解
+
+> Phase 3 为 Compass 的用户界面层，包含 Web UI、图谱可视化和 PWA 离线能力。
+> **前置依赖：** Phase 2 Graph API 和 Search API 已完成。
+
+#### 9.6.1 任务总览
+
+| 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 预估工时 |
+|---------|----------|------|--------|------|----------|
+| **P3-UI-1** | React 前端骨架 + Vite | `feat/p3-ui-skeleton` | P1 | P2-Search-1 | 8h |
+| **P3-UI-2** | 实体详情页（阅读视图） | `feat/p3-ui-entity-detail` | P1 | P3-UI-1 | 6h |
+| **P3-UI-3** | 评分面板（Interest/Strategy/Consensus 可视化） | `feat/p3-ui-score-panel` | P1 | P2-Search-1 | 4h |
+| **P3-UI-4** | 图谱可视化（Force-Directed Graph） | `feat/p3-ui-graph-viz` | P2 | P2-Graph-1 | 12h |
+| **P3-UI-5** | PWA 配置（Service Worker + 离线缓存） | `feat/p3-ui-pwa` | P2 | P3-UI-1 | 6h |
+
+---
+
+#### P3-UI-1：React 前端骨架
+
+**目标：** 搭建可运行的 React + Vite 项目，连接 compass-api。
+
+**技术栈：** React 18 + Vite + TypeScript + Tailwind CSS + React Query
+
+**验收标准：**
+- [ ] `npm run dev` 启动开发服务器（端口 5173）
+- [ ] `GET /health` 健康检查通过后显示连接状态
+- [ ] React Query 配置正确，API 请求走 `/api/v1` 代理
+- [ ] Tailwind CSS 正确配置
+- [ ] 实体列表页（`/entities`）可加载并显示 Phase 2 已有数据
+
+**Vite 配置片段：**
+
+```ts
+// vite.config.ts
+export default defineConfig({
+  server: {
+    proxy: {
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+    },
+  },
+});
+```
+
+---
+
+#### P3-UI-2：实体详情页
+
+**目标：** 展示单个实体的完整信息。
+
+**路由：** `GET /entities/:id`
+
+**验收标准：**
+- [ ] 显示标题、内容（Markdown 渲染）、标签、评分
+- [ ] 显示引用关系（outgoing + incoming refs）
+- [ ] 显示关联图谱入口（点击邻居节点跳转）
+- [ ] 评分面板可直接调整评分（调用 `PATCH /entities/:id/score`）
+
+---
+
+#### P3-UI-3：评分面板
+
+**目标：** 可视化三维评分 + decay 状态。
+
+**验收标准：**
+- [ ] 雷达图显示 Interest / Strategy / Consensus 三维分布
+- [ ] 时间线滑块显示 decay 进度（距离下次衰减的天数）
+- [ ] 手动 boost 按钮（调用 `/scores/update` with `last_boosted_at=now`）
+- [ ] 评分变化历史图表（折线图，最近 30 天）
+
+---
+
+#### P3-UI-4：图谱可视化
+
+**目标：** D3.js 力导向图展示实体关系网络。
+
+**验收标准：**
+- [ ] 中心节点为当前查看的实体
+- [ ] 直接邻居显示在第一圈
+- [ ] 边粗细表示 `strength`
+- [ ] 节点大小表示 `score_composite`
+- [ ] 点击节点跳转详情
+- [ ] 支持拖拽重新布局
+- [ ] 颜色区分 `entity_type`（knowledge/case/log/insight）
+
+**技术方案：** D3.js force simulation，数据来源 `GET /graph/neighbors/:id?depth=2`
+
+---
+
+#### P3-UI-5：PWA 配置
+
+**目标：** 支持离线访问已缓存实体。
+
+**验收标准：**
+- [ ] Service Worker 注册成功（`sw.js`）
+- [ ] 访问过的实体页面可离线浏览（Cache-First 策略）
+- [ ] 后台同步：网络恢复后自动同步评分变更
+- [ ] Web App Manifest（`manifest.json`）包含图标和启动屏
+- [ ] Lighthouse PWA Score ≥ 80
+
+---
+
+### 9.7 Phase 2 完整依赖图
+
+```
+Phase 2
+├── P2-Graph-1 (neighbors basic)  ←─┐
+├── P2-Graph-2 (depth)  ←── P2-Graph-1
+├── P2-Graph-3 (strength filter) ← P2-Graph-1
+├── P2-Graph-4 (path)  ←── P2-Graph-1
+├── P2-Fetch-1 (URL fetch)  ←─┐
+├── P2-Fetch-2 (clean)  ←── P2-Fetch-1
+├── P2-Fetch-3 (save)  ←── P2-Fetch-2
+├── P2-Search-1 (FAISS)  ←─┤
+└── P2-MCP-1 (MCP tools) ←─┴── P2-Graph-1, P2-Search-1, P2-Fetch-3
+
+Phase 3
+├── P3-UI-1 (React skeleton)  ←─┐
+├── P3-UI-2 (entity detail)  ← P3-UI-1
+├── P3-UI-3 (score panel)  ← P3-UI-1 + P2-Search-1
+├── P3-UI-4 (graph viz)  ← P2-Graph-1 + P3-UI-1
+└── P3-UI-5 (PWA)  ← P3-UI-1
+```
+
+---
+
+### 9.8 Phase 2 & 3 验收 Checklist（执行用）
+
+#### Phase 2 核心验收
+
+**Graph API：**
+- [ ] P2-Graph-1: `GET /graph/neighbors/{id}` — 所有直接邻居返回正确
+- [ ] P2-Graph-1: 不存在的实体返回 404
+- [ ] P2-Graph-2: `depth=2` 包含 2 度邻居
+- [ ] P2-Graph-2: `depth=4` 返回 400
+- [ ] P2-Graph-3: `min_strength=0.7` 正确过滤
+- [ ] P2-Graph-4: A→B→C 的最短路径正确
+- [ ] P2-Graph-4: 不连通实体返回 404
+
+**Fetch Pipeline：**
+- [ ] P2-Fetch-1: 正常 URL 返回 HTML 内容
+- [ ] P2-Fetch-1: 超时 10s 返回 408
+- [ ] P2-Fetch-2: HTML 清洗后为合法 Markdown
+- [ ] P2-Fetch-2: 图片和链接正确转换
+- [ ] P2-Fetch-3: 文件成功写入 Vault
+- [ ] P2-Fetch-3: 重复 URL 不允许重复保存
+- [ ] P2-Fetch-3: SQLite entities 表同步写入
+
+**Semantic Search：**
+- [ ] P2-Search-1: 自然语言 query 返回结果
+- [ ] P2-Search-1: 权重和不等于 1 时返回 422
+- [ ] P2-Search-1: highlights 包含查询关键词上下文
+- [ ] P2-Search-1: 无 FAISS 索引时回退 BM25
+
+**MCP Server：**
+- [ ] P2-MCP-1: 3 个 Tool 正确注册
+- [ ] P2-MCP-1: Tool 输出与 REST API 结果一致
+- [ ] P2-MCP-1: Stdio 模式独立启动
+
+#### Phase 3 核心验收
+
+**Web UI：**
+- [ ] P3-UI-1: 开发服务器启动成功
+- [ ] P3-UI-1: API 代理配置正确
+- [ ] P3-UI-2: Markdown 内容正确渲染
+- [ ] P3-UI-2: 引用关系显示完整
+- [ ] P3-UI-3: 雷达图三维分布正确
+- [ ] P3-UI-4: 力导向图正确渲染
+- [ ] P3-UI-4: 节点点击跳转正常
+- [ ] P3-UI-5: Service Worker 离线可用
+- [ ] P3-UI-5: Lighthouse PWA Score ≥ 80
+
+---
+
+*Phase 2 + Phase 3 任务拆解完成。Section 9 现为完整 300+ 行可执行 TDD 文档。*
