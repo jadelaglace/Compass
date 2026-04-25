@@ -868,6 +868,7 @@ jobs:
 
 | 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 预估工时 |
 |---------|----------|------|--------|------|----------|
+| **P2-Entity-1** | `GET /entities` 实体列表（分页+过滤） | `feat/p2-entity-list` | P0 | 无 | 4h |
 | **P2-Graph-1** | `GET /graph/neighbors/{id}` 基础邻居查询 | `feat/p2-graph-1-neighbors-basic` | P0 | 无 | 4h |
 | **P2-Graph-2** | `GET /graph/neighbors/{id}?depth=N` 深度查询 | `feat/p2-graph-2-neighbors-depth` | P0 | P2-Graph-1 | 3h |
 | **P2-Graph-3** | `GET /graph/neighbors/{id}?min_strength=X` 强度过滤 | `feat/p2-graph-3-neighbors-filter` | P1 | P2-Graph-1 | 3h |
@@ -878,7 +879,270 @@ jobs:
 | **P2-Search-1** | `GET /search?q=...` 语义搜索（FAISS） | `feat/p2-search-semantic` | P1 | 无 | 8h |
 | **P2-MCP-1** | MCP Server 适配层（基础 Tools） | `feat/p2-mcp-server` | P2 | 无 | 6h |
 
-### 9.2 Graph API 详细设计
+### 9.2 Entity List API（P2-Entity-1）
+
+> **Issue #44**：当前 Compass API 缺少无需 query 参数即可枚举 vault 中所有实体的端点。
+> `GET /entities/search` 需要 `q` 参数（空字符串返回空结果），`GET /entities/top` 只能按分数排序，无法满足枚举需求。
+> 本任务新增 `GET /entities` 端点，支持无查询条件的全量列表查询。
+
+#### API 规格
+
+```
+GET /entities
+
+Query Parameters:
+  type:     string (optional) — 过滤实体类型：knowledge | case | log | insight
+  min_score: number (optional, default=0) — 最低综合分数过滤
+  tags:     string[] (optional) — 标签过滤，AND 逻辑
+  limit:    integer (optional, default=20, max=100) — 每页条数
+  offset:   integer (optional, default=0) — 偏移量
+
+Response 200:
+{
+  "items": [
+    {
+      "id": "know-000001",
+      "title": "实体标题",
+      "entity_type": "knowledge",
+      "category": "架构层",
+      "vault_path": "Inbox/note.md",
+      "final_score": 72.5,
+      "tags": ["#数学", "#架构"],
+      "created_at": "2026-04-01T08:00:00Z",
+      "updated_at": "2026-04-06T12:00:00Z"
+    }
+  ],
+  "total": 150,
+  "has_more": true
+}
+```
+
+#### 数据库层实现
+
+```python
+# compass-api/src/db/database.py
+
+async def list_entities(
+    self,
+    entity_type: Optional[str] = None,
+    min_score: float = 0.0,
+    tags: Optional[list[str]] = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """Return paginated list of entities with optional filters.
+
+    Returns (items, total_count).
+    """
+    conditions = ["s.final_score >= ?", "e.status = 'active'"]
+    params: list = [min_score]
+
+    if entity_type:
+        conditions.append("e.entity_type = ?")
+        params.append(entity_type)
+
+    # Tag filtering via subquery on taggings table
+    if tags:
+        for tag in tags:
+            conditions.append(
+                "e.id IN (SELECT entity_id FROM taggings WHERE tag = ?)"
+            )
+            params.append(tag)
+
+    where_clause = " AND ".join(conditions)
+
+    # Total count (without limit/offset)
+    count_sql = f"""
+        SELECT COUNT(DISTINCT e.id)
+        FROM entities e
+        JOIN scores s ON e.id = s.entity_id
+        WHERE {where_clause}
+    """
+    async with self.conn.execute(count_sql, params) as cur:
+        total = (await cur.fetchone())[0]
+
+    # Paginated items
+    sql = f"""
+        SELECT DISTINCT e.id, e.title, e.entity_type, e.category,
+               e.vault_path, s.final_score, e.created_at, e.updated_at
+        FROM entities e
+        JOIN scores s ON e.id = s.entity_id
+        WHERE {where_clause}
+        ORDER BY s.final_score DESC, e.updated_at DESC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+    async with self.conn.execute(sql, params) as cur:
+        rows = await cur.fetchall()
+
+    items = [dict(row) for row in rows]
+
+    # Attach tags per entity (separate query; acceptable for small result sets)
+    for item in items:
+        async with self.conn.execute(
+            'SELECT tag FROM taggings WHERE entity_id = ?', (item["id"],)
+        ) as cur:
+            item["tags"] = [row[0] for row in await cur.fetchall()]
+
+    return items, total
+```
+
+#### 测试用例
+
+```python
+# tests/api/test_entities.py
+import pytest
+from httpx import AsyncClient, ASGITransport
+from src.main import app
+
+@pytest.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+@pytest.fixture
+async def seeded_db(isolated_db):
+    """Seeded with 3 entities of different types and scores."""
+    await seed_entity(isolated_db, "know-001", score=80.0, etype="knowledge")
+    await seed_entity(isolated_db, "case-001", score=60.0, etype="case")
+    await seed_entity(isolated_db, "know-002", score=40.0, etype="knowledge")
+    return isolated_db
+
+
+async def test_list_entities_empty(client, isolated_db):
+    """No entities → empty list with total=0."""
+    response = await client.get("/entities")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"] == []
+    assert data["total"] == 0
+    assert data["has_more"] is False
+
+
+async def test_list_entities_returns_all(client, seeded_db):
+    """No filters → returns all seeded entities, sorted by score desc."""
+    response = await client.get("/entities")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 3
+    assert len(data["items"]) == 3
+    assert data["items"][0]["id"] == "know-001"  # highest score
+    assert data["has_more"] is False
+
+
+async def test_list_entities_pagination(client, seeded_db):
+    """limit=2, offset=0 → first 2 items, has_more=True."""
+    response = await client.get("/entities?limit=2&offset=0")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["items"]) == 2
+    assert data["total"] == 3
+    assert data["has_more"] is True
+
+
+async def test_list_entities_pagination_offset_end(client, seeded_db):
+    """offset=2 → last item, has_more=False."""
+    response = await client.get("/entities?limit=20&offset=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["items"]) == 1
+    assert data["has_more"] is False
+
+
+async def test_list_entities_filter_by_type(client, seeded_db):
+    """type=knowledge → only knowledge entities."""
+    response = await client.get("/entities?type=knowledge")
+    assert response.status_code == 200
+    data = response.json()
+    assert all(item["entity_type"] == "knowledge" for item in data["items"])
+    assert data["total"] == 2
+
+
+async def test_list_entities_filter_by_min_score(client, seeded_db):
+    """min_score=50 → only entities with score >= 50."""
+    response = await client.get("/entities?min_score=50")
+    assert response.status_code == 200
+    data = response.json()
+    assert all(item["final_score"] >= 50 for item in data["items"])
+    assert data["total"] == 2
+
+
+async def test_list_entities_invalid_type(client, seeded_db):
+    """Invalid entity_type → 422 validation error."""
+    response = await client.get("/entities?type=invalid")
+    assert response.status_code == 422
+
+
+async def test_list_entities_limit_exceeds_max(client, seeded_db):
+    """limit > 100 → 422 validation error."""
+    response = await client.get("/entities?limit=200")
+    assert response.status_code == 422
+```
+
+#### 验收标准
+
+- [ ] `GET /entities` 无任何 query 参数时返回所有实体（分页）
+- [ ] `type` 参数正确过滤实体类型
+- [ ] `min_score` 参数正确过滤最低分数
+- [ ] `tags` 参数正确过滤标签（AND 逻辑）
+- [ ] `limit` / `offset` 分页正确，`has_more` 准确
+- [ ] 返回结果按 `final_score` 降序排列
+- [ ] 每个 item 包含 `id`、`title`、`entity_type`、`category`、`vault_path`、`final_score`、`tags`、`created_at`、`updated_at`
+- [ ] 空结果返回 `items=[]`、`total=0`、`has_more=False`（200）
+- [ ] `limit > 100` 返回 422
+- [ ] 无效 `type` 值返回 422
+- [ ] `offset` 超出范围不报错，返回空 `items`
+
+#### API Handler 实现要点
+
+```python
+# compass-api/src/api/entities.py
+
+@router.get("", response_model=EntityListResponse)
+async def list_entities(
+    type: Annotated[
+        Optional[str],
+        Query(description="实体类型：knowledge | case | log | insight"),
+    ] = None,
+    min_score: Annotated[
+        float,
+        Query(ge=0, le=100, description="最低综合分数"),
+    ] = 0.0,
+    tags: Annotated[
+        Optional[list[str]],
+        Query(description="标签过滤（AND 逻辑）"),
+    ] = None,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=100, description="每页条数"),
+    ] = 20,
+    offset: Annotated[
+        int,
+        Query(ge=0, description="偏移量"),
+    ] = 0,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> EntityListResponse:
+    """List all entities with optional filters and pagination."""
+    if type is not None and type not in ("knowledge", "case", "log", "insight"):
+        raise HTTPException(status_code=422, detail="Invalid entity_type")
+
+    items, total = await db.list_entities(
+        entity_type=type,
+        min_score=min_score,
+        tags=tags,
+        limit=limit,
+        offset=offset,
+    )
+    has_more = (offset + limit) < total
+    return EntityListResponse(items=items, total=total, has_more=has_more)
+```
+
+#### 工时：4h
+
+---
+
+### 9.3 Graph API 详细设计
 
 #### 数据模型依据
 
@@ -1269,7 +1533,7 @@ async def test_path_not_connected_returns_404(client, isolated_db):
 
 ---
 
-### 9.3 Fetch Pipeline 详细设计
+### 9.4 Fetch Pipeline 详细设计
 
 > Fetch Pipeline 实现 Phase 1 /docs 中埋头的 `NotImplemented` 槽位：
 > `/fetch` → `/clean` → `/save` 三段式流水线。
@@ -1485,7 +1749,7 @@ updated_at: 2026-04-24T12:00:00Z
 
 ---
 
-### 9.4 Semantic Search（FAISS）详细设计
+### 9.5 Semantic Search（FAISS）详细设计
 
 #### P2-Search-1：`POST /search` — 语义 + BM25 混合搜索
 
@@ -1630,7 +1894,7 @@ class FaissIndex:
 
 ---
 
-### 9.5 MCP Server 详细设计
+### 9.6 MCP Server 详细设计
 
 #### P2-MCP-1：MCP Server 适配层
 
@@ -1715,7 +1979,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 ---
 
-### 9.6 Phase 3 任务拆解
+### 9.7 Phase 3 任务拆解
 
 > Phase 3 为 Compass 的用户界面层，包含 Web UI、图谱可视化和 PWA 离线能力。
 > **前置依赖：** Phase 2 Graph API 和 Search API 已完成。
@@ -1819,11 +2083,12 @@ export default defineConfig({
 
 ---
 
-### 9.7 Phase 2 完整依赖图
+### 9.8 Phase 2 完整依赖图
 
 ```
 Phase 2
-├── P2-Graph-1 (neighbors basic)  ←─┐
+├── P2-Entity-1 (entity list)  ←─┐
+├── P2-Graph-1 (neighbors basic)  ←─┤
 ├── P2-Graph-2 (depth)  ←── P2-Graph-1
 ├── P2-Graph-3 (strength filter) ← P2-Graph-1
 ├── P2-Graph-4 (path)  ←── P2-Graph-1
@@ -1843,9 +2108,20 @@ Phase 3
 
 ---
 
-### 9.8 Phase 2 & 3 验收 Checklist（执行用）
+### 9.9 Phase 2 & 3 验收 Checklist（执行用）
 
 #### Phase 2 核心验收
+
+**Entity List API：**
+- [ ] P2-Entity-1: `GET /entities` 无参数时返回全量实体列表（分页）
+- [ ] P2-Entity-1: `type` 参数正确过滤实体类型
+- [ ] P2-Entity-1: `min_score` 参数正确过滤最低分数
+- [ ] P2-Entity-1: `tags` 参数正确过滤标签（AND 逻辑）
+- [ ] P2-Entity-1: `limit` / `offset` 分页正确，`has_more` 准确
+- [ ] P2-Entity-1: 返回结果按 `final_score` 降序排列
+- [ ] P2-Entity-1: `limit > 100` 返回 422
+- [ ] P2-Entity-1: 无效 `type` 值返回 422
+- [ ] P2-Entity-1: 空结果返回 `items=[]`、`total=0`（200）
 
 **Graph API：**
 - [ ] P2-Graph-1: `GET /graph/neighbors/{id}` — 所有直接邻居返回正确
