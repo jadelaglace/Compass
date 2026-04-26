@@ -1001,101 +1001,43 @@ components:
 
 ---
 
-## 6. Feishu Bot 完整命令集
+## 6. 飞书 Bot 交互架构
 
-### 6.1 命令总表
+### 6.1 架构原则
 
-| 命令 | 功能 | 示例 |
-|------|------|------|
-| `/q <内容>` | 快速记录到 Inbox | `/q 量子纠缠与意识的关系值得探索` |
-| `/r <关键词>` | 搜索相关实体（返回卡片） | `/r 量子纠缠` |
-| `/s <id>` | 查看实体详情和评分 | `/s know-000001` |
-| `/l <from> <to>` | 创建双向引用 | `/l know-000001 know-000002` |
-| `/f` | 获取今日战略焦点（Top 5 strategic feed） | `/f` |
-| `/t <内容>` | 快速创建日志条目 | `/t 今天完成了架构设计` |
-| `/score <id> <维度> <分值>` | 手动调整评分 | `/score know-000001 interest 85` |
-| `/tag <id> <标签>` | 添加标签 | `/tag know-000001 #物理 #意识系` |
-| `/feed <mode>` | 获取信息流 | `/feed explore` 或 `/feed consolidate` |
-| `/graph <id>` | 查看实体邻居图（简化版） | `/graph know-000001` |
-| `/help` | 显示命令帮助 | `/help` |
-| `/sync` | 触发强制全量同步 | `/sync` |
+> **飞书 Bot 是消息管道，不懂任何业务指令。**
 
-### 6.2 功能定义
+所有业务逻辑由 OpenClaw Skill 处理，飞书 Bot 只负责：
+1. 接收用户消息 → 转发给 OpenClaw
+2. 接收 OpenClaw 响应 → 渲染成飞书卡片发给用户
 
-#### 6.2.1 `/q` — 快速记录
-
-**输入：** `/q <内容>`
-**返回卡片（success，green）：**
-```json
-{
-  "header": "已记录到 Inbox",
-  "content": "<内容前100字>",
-  "metadata": {
-    "id": "<实体ID>",
-    "time": "<时间戳>",
-    "suggested_tags": ["#飞书导入", "#待分类"]
-  },
-  "actions": [
-    {"text": "查看", "action": "open_entity", "entity_id": "<id>"},
-    {"text": "关联知识", "action": "link_prompt"},
-    {"text": "标记战略", "action": "score_prompt"}
-  ]
-}
+```
+飞书用户 → [消息] → 飞书 Bot → OpenClaw Gateway → OpenClaw Skill
+                                                        ↓
+                                              compass action (JSON)
+                                                        ↓
+                                              compass render (人话)
+                                                        ↓
+飞书用户 ← [卡片] ←──────────── OpenClaw ←──────────────
 ```
 
-#### 6.2.2 `/r` — 搜索
+### 6.2 自然语言意图检测（OpenClaw Skill 侧）
 
-**输入：** `/r <关键词>`
-**返回卡片（blue）：** Top 5 结果，每条显示标题、评分、标签、摘要片段
+OpenClaw Skill 接收用户自然语言消息，通过意图检测表匹配到对应的 action：
 
-#### 6.2.3 `/s` — 详情
+| 用户意图（自然语言） | action | 说明 |
+|---------------------|--------|------|
+| "帮我记一下xxx" / "新建一条知识" | `create` | 创建实体 |
+| "搜一下xxx" / "找找相关的内容" | `search` | 搜索实体 |
+| "查看xxx" / "给我看看这个知识" | `get` | 获取详情 |
+| "今日推荐" / "看看有什么新鲜的" | `feed` | 信息流 |
+| "评分" / "调整下分数" | `score` | 评分调整 |
+| "建立关联" / "这两个有关系" | `context` | 引用创建 |
+| "上下文" / "我现在的知识状态" | `top` | 上下文准备 |
 
-**输入：** `/s <id>`
-**返回卡片（grey）：** 标题、评分雷达字段、标签、内容摘要、快捷操作按钮
+### 6.3 飞书卡片渲染规范
 
-#### 6.2.4 `/l` — 创建引用
-
-**输入：** `/l <from_id> <to_id>`
-**约束：** 两个 ID 均需存在，返回成功/错误提示
-
-#### 6.2.5 `/f` — 战略焦点
-
-**输入：** `/f`
-**调用：** `GET /feed/strategic?limit=5`，返回 Top 5 战略高分实体
-
-#### 6.2.6 `/t` — 创建日志
-
-**输入：** `/t <内容>`
-**调用：** `POST /entities`，type=log，subtype=short_term
-
-#### 6.2.7 `/score` — 评分调整
-
-**输入：** `/score <id> <维度> <分值>`
-**维度：** `interest` | `strategy` | `consensus`
-**分值：** 0-100
-**调用：** `PATCH /entities/<id>/score`
-
-#### 6.2.8 `/tag` — 添加标签
-
-**输入：** `/tag <id> <标签1> [标签2...]`
-**调用：** `PATCH /entities/<id>`，追加 tags
-
-#### 6.2.9 `/feed` — 信息流
-
-**输入：** `/feed <mode>`
-**mode：** `explore` | `consolidate` | `strategic`
-
-#### 6.2.10 `/graph` — 邻居图
-
-**输入：** `/graph <id>`
-**调用：** `GET /graph/neighbors/<id>?depth=1`，返回邻居数量+标题列表
-
-#### 6.2.11 `/sync` — 强制同步
-
-**输入：** `/sync`
-**调用：** `POST /sync/force`，返回同步条数+错误列表
-
-### 6.3 飞书卡片模板规范
+OpenClaw Skill 调用 `compass render` 将 action JSON 转为飞书卡片格式：
 
 ```json
 {
@@ -1111,11 +1053,23 @@ components:
 ```
 
 **template_color 规范：**
-- searching / info：`blue`
-- created / success：`green`
+- info / searching：`blue`
+- success / created：`green`
 - warning：`orange`
 - error：`red`
 - neutral：`grey`
+
+### 6.4 render 输出格式（OpenClaw Skill 侧）
+
+| action | render 格式 | 示例 |
+|--------|------------|------|
+| `search` | 列表卡片 | Top 5 结果，标题+评分+标签+片段 |
+| `feed` | 列表卡片 | Feed 模式 + 实体摘要 |
+| `get` | 详情卡片 | 标题+评分雷达+标签+内容摘要 |
+| `top` | 上下文卡片 | 当前战略焦点 + 高分知识 |
+| `create` | 确认卡片 | 创建成功 + ID + 建议标签 |
+| `score` | 反馈卡片 | 评分结果 + 变化对比 |
+| `context` | 引用卡片 | 邻居节点列表 |
 
 ---
 
