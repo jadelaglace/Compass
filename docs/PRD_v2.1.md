@@ -451,34 +451,43 @@ paths:
 
   /entities:
     get:
-      summary: 查询实体列表
+      summary: 列出所有实体（分页+过滤）
+      description: |
+        无需 query 参数即可返回 vault 中所有已索引实体的列表，按综合分数降序排列。
+        **对应 Issue #44**：解决 `GET /entities/search?q=` 需要 query 字符串才能查询的问题。
       parameters:
         - name: type
           in: query
           schema:
             type: string
             enum: [knowledge, case, log, insight]
+          description: 过滤实体类型
         - name: min_score
           in: query
           schema:
             type: number
-            default: 50
+            default: 0
+          description: 最低综合分数过滤（默认 0，即返回所有实体）
         - name: tags
           in: query
           schema:
             type: array
             items:
               type: string
+          description: 标签过滤（AND 逻辑）
         - name: limit
           in: query
           schema:
             type: integer
             default: 20
+            maximum: 100
+          description: 每页条数
         - name: offset
           in: query
           schema:
             type: integer
             default: 0
+          description: 偏移量
       responses:
         200:
           description: 实体列表
