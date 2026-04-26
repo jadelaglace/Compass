@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from src import config
@@ -167,8 +167,8 @@ async def top_entities(
 
 @router.get("")
 async def list_entities(
-    limit: int = 100,
-    offset: int = 0,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     category: Optional[str] = None,
     db: Annotated[Database, Depends(get_db)] = None,
 ) -> dict:
