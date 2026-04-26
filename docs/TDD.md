@@ -877,7 +877,19 @@ jobs:
 | **P2-Fetch-2** | `POST /fetch/clean` 内容清洗结构化 | `feat/p2-fetch-2-clean` | P0 | P2-Fetch-1 | 6h |
 | **P2-Fetch-3** | `POST /fetch/save` 清洗结果写入 Vault | `feat/p2-fetch-3-save` | P0 | P2-Fetch-2 | 4h |
 | **P2-Search-1** | `GET /search?q=...` 语义搜索（FAISS） | `feat/p2-search-semantic` | P1 | 无 | 8h |
-| **P2-MCP-1** | MCP Server 适配层（基础 Tools） | `feat/p2-mcp-server` | P2 | 无 | 6h |
+| **P2-MCP-1** | MCP Server 适配层（基础 Tools） | `feat/p2-mcp-server` | P3 | 无 | 6h |
+| **P2-Timeline-1** | `PATCH /entities/{id}/access` 访问记录 | `feat/p2-timeline-access` | P1 | P2-Entity-1 | 2h |
+| **P2-Timeline-2** | `GET /entities/{id}/timeline` 时间线查询 | `feat/p2-timeline-query` | P1 | P2-Timeline-1 | 3h |
+| **P2-History-1** | `POST /scores/update` 自动写入 score_history | `feat/p2-score-history` | P1 | P2-Entity-1 | 2h |
+| **P2-History-2** | `GET /entities/{id}/score/history` 评分趋势 | `feat/p2-score-history` | P1 | P2-History-1 | 3h |
+| **P2-Insight-1** | Insight 实体 CRUD + maturity 状态机 | `feat/p2-insight-engine` | P2 | P2-Entity-1 | 4h |
+| **P2-Insight-2** | Insight 成熟度演化触发器 | `feat/p2-insight-engine` | P2 | P2-Graph-1 + P2-Insight-1 | 6h |
+| **P2-Insight-3** | Insight → Knowledge 导出降级 | `feat/p2-insight-engine` | P2 | P2-Insight-2 | 3h |
+| **P2-Ref-1** | 引用强度自动计算（共同邻居） | `feat/p2-ref-intelligence` | P2 | P2-Graph-1 | 6h |
+| **P2-Ref-2** | 双向引用自动维护 | `feat/p2-ref-intelligence` | P2 | P2-Graph-1 | 3h |
+| **P2-Decay-1** | `PATCH /entities/{id}/decay-config` 个性化半衰期 | `feat/p2-decay-tuner` | P2 | P2-Entity-1 | 3h |
+| **P2-Decay-2** | `GET /entities/{id}/decay-preview` Decay 预览 | `feat/p2-decay-tuner` | P2 | P2-Decay-1 | 3h |
+| **P2-Decay-3** | Decay 模拟器（未来90天衰减曲线） | `feat/p2-decay-tuner` | P2 | P2-Decay-2 | 4h |
 
 ### 9.2 Entity List API（P2-Entity-1）
 
@@ -2086,22 +2098,29 @@ export default defineConfig({
 ### 9.8 Phase 2 完整依赖图
 
 ```
-Phase 2
-├── P2-Entity-1 (entity list)  ←─┐
-├── P2-Graph-1 (neighbors basic)  ←─┤
-├── P2-Graph-2 (depth)  ←── P2-Graph-1
-├── P2-Graph-3 (strength filter) ← P2-Graph-1
-├── P2-Graph-4 (path)  ←── P2-Graph-1
-├── P2-Fetch-1 (URL fetch)  ←─┐
-├── P2-Fetch-2 (clean)  ←── P2-Fetch-1
-├── P2-Fetch-3 (save)  ←── P2-Fetch-2
-├── P2-Search-1 (FAISS)  ←─┤
-└── P2-MCP-1 (MCP tools) ←─┴── P2-Graph-1, P2-Search-1, P2-Fetch-3
+Phase 2 基座
+└── P2-Entity-1 ──┬──────────────────────────────────┐
+
+Graph 任务线            Timeline/Access        Score History
+├── P2-Graph-1 ──┬── P2-Graph-2 ── P2-Graph-3 ── P2-Graph-4   P2-Timeline-1 ── P2-Timeline-2
+│                │                                                      │
+│                └──→ P2-Insight-1 ──→ P2-Insight-2 ──→ P2-Insight-3    │
+│                │                                                      │
+│                └──→ P2-Ref-1 ──────→ P2-Ref-2                         │
+│                                                                      │
+Fetch 任务线                            Decay Tuner                    │
+├── P2-Fetch-1 ──→ P2-Fetch-2 ──→ P2-Fetch-3 ─────────────────────────→ P2-Decay-1 ──→ P2-Decay-2 ──→ P2-Decay-3
+│                                                                      │
+Search 任务线                             Score History ──────────────→ P2-History-1 ──→ P2-History-2
+└── P2-Search-1 ────────────────────────────────────────────────────────┘
+
+MCP（汇总所有下游能力，Phase 2 后期接入）
+└── P2-MCP-1 ← P2-Graph-1 + P2-Search-1 + P2-Fetch-3 + P2-Timeline-2
 
 Phase 3
 ├── P3-UI-1 (React skeleton)  ←─┐
 ├── P3-UI-2 (entity detail)  ← P3-UI-1
-├── P3-UI-3 (score panel)  ← P3-UI-1 + P2-Search-1
+├── P3-UI-3 (score panel)  ← P3-UI-1 + P2-History-2 + P2-Decay-3
 ├── P3-UI-4 (graph viz)  ← P2-Graph-1 + P3-UI-1
 └── P3-UI-5 (PWA)  ← P3-UI-1
 ```
@@ -2165,6 +2184,656 @@ Phase 3
 - [ ] P3-UI-5: Service Worker 离线可用
 - [ ] P3-UI-5: Lighthouse PWA Score ≥ 80
 
+**Timeline & Access：**
+- [ ] P2-Timeline-1: `PATCH /entities/{id}/access` 访问后 access_count++ 且 accessed_at 更新
+- [ ] P2-Timeline-1: 同一实体的连续访问在 5 分钟内合并为一次（debounce）
+- [ ] P2-Timeline-2: `GET /entities/{id}/timeline` 返回该实体所有事件，按时间倒序
+- [ ] P2-Timeline-2: `event_type` 过滤正确（create / read / update / cite / reflect）
+- [ ] P2-Timeline-2: `days=N` 参数正确限制时间范围
+
+**Score History：**
+- [ ] P2-History-1: `POST /scores/update` 成功后同步写入 `score_history` 表
+- [ ] P2-History-1: `trigger_type` 字段正确记录触发原因（manual / auto_decay / access_boost）
+- [ ] P2-History-2: `GET /entities/{id}/score/history?days=30` 返回趋势数据
+- [ ] P2-History-2: `trend` 字段正确计算（rising / declining / stable）
+- [ ] P2-History-2: `change_pct` 正确反映相对变化百分比
+
+**Insight Engine：**
+- [ ] P2-Insight-1: `GET /insights` 返回所有 insight 实体，支持 maturity 过滤
+- [ ] P2-Insight-1: `POST /insights` 创建新 insight，maturity 默认为 `spark`
+- [ ] P2-Insight-1: maturity 状态机转换路径正确（spark → framework → mature）
+- [ ] P2-Insight-2: 被 3+ case 引用时触发 spark → framework 演化
+- [ ] P2-Insight-2: 被 2+ knowledge 引用时触发 spark → framework 演化
+- [ ] P2-Insight-2: 演化时写入 `refined_at` 时间戳
+- [ ] P2-Insight-3: mature insight 可导出为新的 knowledge 实体
+- [ ] P2-Insight-3: 导出后 mature insight 状态变更为 `archived`
+
+**Reference Intelligence：**
+- [ ] P2-Ref-1: 创建引用时自动计算 `strength` = |N(A)∩N(B)| / √(|N(A)|×|N(B)|)
+- [ ] P2-Ref-1: `strength` 为 0 时该引用被软删除（不返回但保留历史）
+- [ ] P2-Ref-2: 创建 A→B 时，若存在 B→A 且 `ref_type` 相同，则合并（strength 取最大值）
+- [ ] P2-Ref-2: `ref_type` 为 `cites` 时自动补充反向 `inspired` 引用
+
+**Decay Tuner：**
+- [ ] P2-Decay-1: `PATCH /entities/{id}/decay-config` 可覆盖全局默认半衰期
+- [ ] P2-Decay-1: 未设置个性化半衰期时回退全局默认值
+- [ ] P2-Decay-2: `GET /entities/{id}/decay-preview?days=30` 返回 30 天后的预测分数
+- [ ] P2-Decay-2: preview 考虑当前 decay_factor，不修改实际数据
+- [ ] P2-Decay-3: Decay 模拟器返回未来 90 天每一天的预测分数数组
+- [ ] P2-Decay-3: 模拟器可指定自定义半衰期参数（用于 A/B 测试对比）
+
+**MCP Server：**
+- [ ] P2-MCP-1: 3 个 Tool 正确注册（compass_neighbors / compass_search / compass_fetch_save）
+- [ ] P2-MCP-1: Tool 输出与 REST API 结果一致
+- [ ] P2-MCP-1: Stdio 模式独立启动
+- [ ] P2-MCP-1: 可与 Cursor / Claude Code 等 MCP Native Agent 对接
+
 ---
 
-*Phase 2 + Phase 3 任务拆解完成。Section 9 现为完整 300+ 行可执行 TDD 文档。*
+## 9.9 新增任务线详细设计
+
+### 9.10 Timeline & Access（P2-Timeline-1~2）
+
+#### P2-Timeline-1：`PATCH /entities/{id}/access` — 访问记录
+
+**目标：** 记录实体访问事件，更新 `accessed_at` 和 `access_count`，触发 decay 重新计算。
+
+**API 规格：**
+
+```
+PATCH /entities/{id}/access
+
+Response 200:
+{
+  "entity_id": "know-000001",
+  "access_count": 42,
+  "accessed_at": "2026-04-26T14:37:00Z",
+  "decay_updated": true
+}
+Response 404:  // 实体不存在
+```
+
+**验收标准：**
+- [ ] `access_count` 在原值基础上 +1
+- [ ] `accessed_at` 更新为当前时间
+- [ ] 同一实体在 5 分钟内的连续访问合并为一次（防重复计数）
+- [ ] 访问触发 decay 因子重新计算（调用 Rust compute_score）
+- [ ] 不存在的实体返回 404
+
+**实现要点：**
+
+```python
+# compass-api/src/api/entities.py
+
+ACCESS_DEBOUNCE_SECONDS = 300  # 5 分钟
+
+@router.patch("/{entity_id}/access")
+async def record_access(
+    entity_id: str,
+    db: Database = Depends(get_db),
+) -> AccessResponse:
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    # Debounce：检查最近一次访问时间
+    last_access = await db.get_last_access(entity_id)
+    now = datetime.now(tz=timezone.utc)
+    if last_access and (now - last_access).total_seconds() < ACCESS_DEBOUNCE_SECONDS:
+        # 合并为一次，不增加 count
+        return AccessResponse(
+            entity_id=entity_id,
+            access_count=entity["access_count"],
+            accessed_at=last_access.isoformat(),
+            decay_updated=False,
+        )
+
+    # 更新 access_count 和 accessed_at
+    await db.update_access(entity_id, now)
+    # 触发 decay 重新计算
+    await recalculate_decay(entity_id, db)
+    return AccessResponse(
+        entity_id=entity_id,
+        access_count=entity["access_count"] + 1,
+        accessed_at=now.isoformat(),
+        decay_updated=True,
+    )
+```
+
+---
+
+#### P2-Timeline-2：`GET /entities/{id}/timeline` — 时间线查询
+
+**目标：** 返回实体的所有 timeline 事件，支持过滤和分页。
+
+**API 规格：**
+
+```
+GET /entities/{id}/timeline?event_type=read&days=30&limit=50&offset=0
+
+Response 200:
+{
+  "entity_id": "know-000001",
+  "events": [
+    {
+      "id": 1001,
+      "event_type": "read",
+      "trigger": "manual",
+      "intensity": 1.0,
+      "timestamp": "2026-04-26T14:37:00Z",
+      "source": "feishu"
+    },
+    {
+      "id": 1000,
+      "event_type": "cite",
+      "trigger": "auto",
+      "intensity": 0.8,
+      "timestamp": "2026-04-25T10:00:00Z",
+      "source": "system"
+    }
+  ],
+  "total": 2,
+  "has_more": false
+}
+```
+
+**event_type 枚举：** `create` | `read` | `update` | `cite` | `reflect` | `agent_query`
+
+**验收标准：**
+- [ ] 无过滤时返回该实体所有事件，按时间倒序
+- [ ] `event_type` 过滤正确
+- [ ] `days=N` 只返回 N 天内的事件
+- [ ] `limit` / `offset` 分页正确
+- [ ] 不存在的实体返回 404
+
+**工时：** P2-Timeline-1（2h） + P2-Timeline-2（3h） = **5h**
+
+---
+
+### 9.11 Score History API（P2-History-1~2）
+
+#### P2-History-1：`POST /scores/update` 时同步写入 score_history
+
+**目标：** 每次评分变更自动记录历史，供趋势分析使用。
+
+**数据库操作（新增）：**
+
+```python
+# compass-api/src/db/database.py
+
+async def write_score_history(
+    self,
+    entity_id: str,
+    dimension: str,  # 'interest' | 'strategy' | 'consensus' | 'composite'
+    old_value: float,
+    new_value: float,
+    reason: str,
+    trigger_type: str,  # 'manual' | 'auto_decay' | 'access_boost' | 'agent_suggestion'
+) -> None:
+    """写入单条评分历史记录。"""
+    await self.conn.execute(
+        """
+        INSERT INTO score_history (entity_id, dimension, old_value, new_value, reason, trigger_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (entity_id, dimension, old_value, new_value, reason, trigger_type),
+    )
+```
+
+**触发时机：**
+- `PATCH /entities/{id}/score`（手动调整）→ `trigger_type='manual'`
+- FileWatcher 检测到文件更新 + decay 衰减 → `trigger_type='auto_decay'`
+- `PATCH /entities/{id}/access`（访问 boost）→ `trigger_type='access_boost'`
+- Agent 建议调整 → `trigger_type='agent_suggestion'`
+
+---
+
+#### P2-History-2：`GET /entities/{id}/score/history` — 评分趋势
+
+**API 规格：**
+
+```
+GET /entities/{id}/score/history?dimension=interest&days=30
+
+Response 200:
+{
+  "entity_id": "know-000001",
+  "dimension": "interest",
+  "records": [
+    {"timestamp": "2026-04-26T14:37:00Z", "value": 72.5},
+    {"timestamp": "2026-04-15T00:00:00Z", "value": 80.0},
+    {"timestamp": "2026-04-01T00:00:00Z", "value": 85.0}
+  ],
+  "trend": "declining",
+  "change_pct": -14.7,
+  "min_value": 72.5,
+  "max_value": 85.0
+}
+
+Response 404:  // 实体不存在
+```
+
+**trend 计算规则：**
+```
+recent_avg = 最近3次记录的平均值
+older_avg  = 再往前3次记录的平均值
+change_pct = (recent_avg - older_avg) / older_avg × 100
+
+trend = "rising"    if change_pct > 5
+      | "declining" if change_pct < -5
+      | "stable"
+```
+
+**验收标准：**
+- [ ] `dimension` 参数正确过滤维度（默认 `composite`）
+- [ ] `days=N` 参数正确限制时间范围（默认 90）
+- [ ] `records` 按时间倒序
+- [ ] `trend` 计算正确
+- [ ] `change_pct` 保留 1 位小数
+- [ ] 实体不存在返回 404
+
+**工时：** P2-History-1（2h） + P2-History-2（3h） = **5h**
+
+---
+
+### 9.12 Insight Engine（P2-Insight-1~3）
+
+#### P2-Insight-1：Insight 实体 CRUD + maturity 状态机
+
+**目标：** 支持 Insight 特殊实体的创建、查询和 maturity 状态流转。
+
+**Insight 实体与普通 entity 的区别：**
+
+| 字段 | Knowledge | Insight |
+|------|-----------|---------|
+| `entity_type` | `knowledge` | `insight` |
+| `maturity` | 无 | `spark` / `framework` / `mature` |
+| `derived_from` | 无 | 有（引用来源） |
+| `evolved_into` | 无 | 有（演化目标） |
+| 状态流转 | 无 | spark → framework → mature → archived |
+
+**API 规格：**
+
+```
+POST /entities
+Body: {"entity_type": "insight", "title": "灵感标题", "content": "...", "maturity": "spark"}
+
+GET /entities?type=insight&maturity=spark
+GET /entities/{id}
+```
+
+**maturity 状态机（允许的转换）：**
+
+```
+spark ──→ framework ──→ mature
+  │            │
+  └────────────┴──→ archived（随时可存档）
+```
+
+**验收标准：**
+- [ ] `POST /entities` 支持 `entity_type=insight`
+- [ ] `GET /entities?type=insight` 返回所有 insight
+- [ ] `GET /entities?type=insight&maturity=spark` 正确过滤 maturity
+- [ ] `maturity` 字段出现在 entity 详情中
+- [ ] `derived_from` 和 `evolved_into` 字段正确填充
+- [ ] 不允许的状态转换返回 422
+
+---
+
+#### P2-Insight-2：成熟度演化触发器
+
+**触发条件：**
+
+| 当前状态 | 触发条件 | 目标状态 |
+|----------|----------|----------|
+| spark | 被 3+ case 引用 OR 被 2+ knowledge 引用 | framework |
+| spark | 超过 90 天无引用 | spark（不变） |
+| framework | 被 5+ knowledge 引用 OR 包含 `outcome` 字段 | mature |
+| framework | 超过 180 天无引用 | spark（降级） |
+| mature | 超过 365 天无引用 | archived |
+
+**演化检查时机：**
+- 每次引用创建时（`POST /refs`）检查两端实体
+- 每天定时任务扫描所有 insight（避免遗漏）
+
+**实现要点：**
+
+```python
+async def check_insight_evolution(db: Database, insight_id: str) -> Optional[str]:
+    """检查 insight 是否满足成熟度演化条件，返回目标状态或 None。"""
+    insight = await db.get_entity(insight_id, entity_type="insight")
+    if not insight or insight["entity_type"] != "insight":
+        return None
+
+    maturity = insight["maturity"]
+
+    # 统计引用数
+    incoming_refs = await db.get_incoming_refs(insight_id)  # 引用该 insight 的实体
+    case_refs = [r for r in incoming_refs if r["entity_type"] == "case"]
+    knowledge_refs = [r for r in incoming_refs if r["entity_type"] == "knowledge"]
+
+    if maturity == "spark":
+        if len(case_refs) >= 3 or len(knowledge_refs) >= 2:
+            return "framework"
+    elif maturity == "framework":
+        if len(knowledge_refs) >= 5:
+            return "mature"
+        # 检查 outcome 字段
+        if insight.get("outcome"):
+            return "mature"
+
+    return None
+```
+
+**验收标准：**
+- [ ] 引用数达标时自动触发 maturity 演化
+- [ ] 演化时设置 `refined_at` 为当前时间
+- [ ] 演化时记录 `evolved_into` / `derived_from`
+- [ ] 定时任务正确扫描所有 insight
+- [ ] 不满足条件时 insight 状态不变
+
+---
+
+#### P2-Insight-3：Insight → Knowledge 导出降级
+
+**目标：** mature insight 可导出为 knowledge 实体，自身降为 archived。
+
+**API 规格：**
+
+```
+POST /entities/{insight_id}/export
+Body: {"title": "新 Knowledge 标题"}  // 可选，默认沿用原标题
+
+Response 201:
+{
+  "new_entity_id": "know-000042",
+  "exported_from_insight_id": "ins-000001",
+  "maturity": "mature",
+  "status": "archived"
+}
+```
+
+**导出后的变化：**
+- 新建 `knowledge` 实体，内容复制自 insight（去掉 maturity 相关字段）
+- 原 insight 的 `status` 变为 `archived`
+- 原 insight 的 `evolved_into` 指向新建 knowledge
+
+**验收标准：**
+- [ ] 导出后原 insight 状态变为 `archived`
+- [ ] 新建 knowledge 的 `derived_from` 指向原 insight
+- [ ] `export` 操作 idempotent（已 archived 的 insight 不能再次导出）
+- [ ] 导出前检查 `maturity=mature`，否则返回 422
+
+**工时：** P2-Insight-1（4h） + P2-Insight-2（6h） + P2-Insight-3（3h） = **13h**
+
+---
+
+### 9.13 Reference Intelligence（P2-Ref-1~2）
+
+#### P2-Ref-1：引用强度自动计算
+
+**背景：** PRD v2.1 的 `refs.strength` 字段默认为 1.0，没有自动计算逻辑。本任务实现基于图结构的共同邻居相似度。
+
+**计算公式（余弦相似度在图上）：**
+
+```
+strength(A → B) = |N(A) ∩ N(B)| / √(|N(A)| × |N(B)|)
+
+其中 N(X) = {X 的所有邻居节点 ID，不包括 X 自身}
+     A → B 表示 A 引用了 B（A 是 source，B 是 target）
+```
+
+**含义：** A 和 B 的共同邻居越多，强度越高。
+
+**触发时机：**
+- 引用创建时立即计算
+- 引用删除时反向影响（周围节点重新计算）
+
+**实现要点：**
+
+```python
+async def compute_ref_strength(db: Database, source_id: str, target_id: str) -> float:
+    """计算 source → target 的引用强度。"""
+    neighbors_a = await db.get_neighbor_ids(source_id)
+    neighbors_b = await db.get_neighbor_ids(target_id)
+    neighbors_a.discard(source_id)  # 排除自身
+    neighbors_b.discard(target_id)
+
+    if not neighbors_a or not neighbors_b:
+        return 0.0  # 孤立的边，强度为 0
+
+    intersection = neighbors_a & neighbors_b
+    union_sqrt = (len(neighbors_a) * len(neighbors_b)) ** 0.5
+    return len(intersection) / union_sqrt if union_sqrt > 0 else 0.0
+```
+
+**验收标准：**
+- [ ] 新引用创建后 strength 正确计算（不是默认 1.0）
+- [ ] 引用删除后相关节点重新计算影响正确
+- [ ] strength = 0 的引用自动软删除（不出现在查询结果中）
+- [ ] self-loop 引用强度强制为 0
+
+---
+
+#### P2-Ref-2：双向引用自动维护
+
+**规则：**
+- `ref_type = 'cites'` 时，自动创建反向 `inspired` 引用（B → A，强度相同）
+- 若反向引用已存在（任意 `ref_type`），则合并：`strength = max(strength_A→B, strength_B→A)`
+- `ref_type = 'inspired'` 时，**不**自动创建反向 cites（避免循环）
+
+**实现要点：**
+
+```python
+async def create_ref_with_backlink(db: Database, source_id: str, target_id: str, ref_type: str) -> Ref:
+    ref = await db.create_ref(source_id, target_id, ref_type)
+
+    if ref_type == "cites":
+        # 自动创建反向 inspired 引用
+        existing = await db.get_ref(target_id, source_id)
+        if existing:
+            # 合并：strength 取最大值
+            new_strength = max(ref.strength, existing.strength)
+            await db.update_ref_strength(target_id, source_id, new_strength)
+        else:
+            await db.create_ref(target_id, source_id, "inspired", ref.strength)
+
+    return ref
+```
+
+**验收标准：**
+- [ ] `cites` 引用自动创建反向 `inspired`
+- [ ] `inspired` 引用不触发双向创建
+- [ ] 反向引用已存在时 strength 取最大值
+- [ ] 删除正向引用时反向引用同步处理
+
+**工时：** P2-Ref-1（6h） + P2-Ref-2（3h） = **9h**
+
+---
+
+### 9.14 Decay Tuner（P2-Decay-1~3）
+
+#### P2-Decay-1：`PATCH /entities/{id}/decay-config` — 个性化半衰期
+
+**目标：** 允许用户为单个实体覆盖全局默认半衰期。
+
+**API 规格：**
+
+```
+PATCH /entities/{id}/decay-config
+Body: {
+  "interest_half_life_days": 60.0,
+  "strategy_half_life_days": 180.0,
+  "consensus_half_life_days": 90.0
+}
+
+Response 200:
+{
+  "entity_id": "know-000001",
+  "interest_half_life_days": 60.0,
+  "strategy_half_life_days": 180.0,
+  "consensus_half_life_days": 90.0,
+  "is_override": true,
+  "updated_at": "2026-04-26T14:37:00Z"
+}
+Response 404:  // 实体不存在
+```
+
+**数据库变化：**
+
+```sql
+-- entities 表新增字段（Phase 2 迁移）
+ALTER TABLE entities ADD COLUMN decay_override_json TEXT;
+```
+
+**is_override 逻辑：**
+- `decay_override_json IS NULL` → 使用全局默认半衰期，`is_override = false`
+- `decay_override_json IS NOT NULL` → 使用个性化半衰期，`is_override = true`
+
+---
+
+#### P2-Decay-2：`GET /entities/{id}/decay-preview?days=30` — Decay 预览
+
+**目标：** 在不修改数据的情况下，预览未来某天的预测分数。
+
+**API 规格：**
+
+```
+GET /entities/{id}/decay-preview?days=30
+
+Response 200:
+{
+  "entity_id": "know-000001",
+  "current_scores": {
+    "interest": 80.0,
+    "strategy": 90.0,
+    "consensus": 60.0,
+    "composite": 78.0
+  },
+  "preview_scores": {
+    "interest": 72.5,
+    "strategy": 88.7,
+    "consensus": 57.2,
+    "composite": 74.9
+  },
+  "preview_at": "2026-05-26T14:37:00Z",  // 30 天后
+  "decay_config": {
+    "interest_half_life_days": 60.0,
+    "strategy_half_life_days": 180.0,
+    "consensus_half_life_days": 90.0
+  }
+}
+```
+
+**计算逻辑：** 完全在 Rust 层计算，不修改数据库。
+
+---
+
+#### P2-Decay-3：Decay 模拟器（未来 90 天衰减曲线）
+
+**API 规格：**
+
+```
+GET /entities/{id}/decay-simulate?days=90&custom_halflife_interest=15
+
+Response 200:
+{
+  "entity_id": "know-000001",
+  "simulated_days": 90,
+  "using_custom_halflife": true,
+  "custom_halflife": {"interest": 15.0, "strategy": 365.0, "consensus": 60.0},
+  "curve": [
+    {"day": 0,  "interest": 80.0, "strategy": 90.0, "consensus": 60.0, "composite": 78.0},
+    {"day": 1,  "interest": 79.8, "strategy": 89.9, "consensus": 59.9, "composite": 77.8},
+    ...
+    {"day": 30, "interest": 65.0, "strategy": 87.1, "consensus": 55.0, "composite": 71.2},
+    ...
+    {"day": 90, "interest": 42.0, "strategy": 80.0, "consensus": 42.0, "composite": 56.8}
+  ],
+  "half_life_markers": {
+    "interest": {"day": 60, "value": 40.0},
+    "strategy": {"day": 180, "value": 45.0},
+    "consensus": {"day": 60, "value": 30.0}
+  }
+}
+```
+
+**用途：** 用户可对比不同半衰期配置下的衰减曲线，用于调参决策。
+
+**验收标准：**
+- [ ] `days` 参数最大支持 365（超过返回 400）
+- [ ] `custom_halflife_*` 参数可选，不提供则使用实体当前配置
+- [ ] `curve` 数组每一天都有一条记录（数据量大时支持 downsample）
+- [ ] `half_life_markers` 标注每个维度首次达到 50% 的天数
+
+**工时：** P2-Decay-1（3h） + P2-Decay-2（3h） + P2-Decay-3（4h） = **10h**
+
+---
+
+## 9.15 完整任务依赖图（最终版）
+
+```
+Phase 2 基座
+└── P2-Entity-1 (GET /entities list)
+
+Graph 任务线 ─────────────────────────────────────────────────────────────┐
+├── P2-Graph-1 (neighbors basic) ──┬── P2-Graph-2 (depth)                │
+│                                  ├── P2-Graph-3 (strength filter)        │
+│                                  └── P2-Graph-4 (path)                   │
+│                                                                      │
+Timeline/Access ───────────────────────────┐                               │
+├── P2-Timeline-1 (access record) ───────┼──→ P2-Timeline-2 (timeline query)  │
+│                                          │                               │
+Score History ────────────────────────────┼───────────────────────────────┘
+├── P2-History-1 (write history) ────────┼──→ P2-History-2 (score trend API)
+│                                          │
+Fetch 任务线 ────────────────────────────────────────────────────────────┐
+├── P2-Fetch-1 (URL fetch) ───→ P2-Fetch-2 (clean) ───→ P2-Fetch-3 (save)  │
+│                                                                          │
+Search 任务线 ───────────────────────────────────────────────────────────┐
+└── P2-Search-1 (FAISS semantic search)                                     │
+                                                                           │
+Insight Engine ─────────────────────────────────────────────────────────┘
+├── P2-Insight-1 (CRUD + maturity state machine) ──→ P2-Insight-2 (evolution trigger)
+│                                                     └──→ P2-Insight-3 (export to knowledge)
+│
+Reference Intelligence ──────────────────────────────────────────────────┘
+├── P2-Ref-1 (strength auto-calculation) ──→ P2-Ref-2 (bidirectional maintenance)
+│
+Decay Tuner ──────────────────────────────────────────────────────────────┘
+├── P2-Decay-1 (per-entity half-life config) ──→ P2-Decay-2 (decay preview)
+│                                                └──→ P2-Decay-3 (90-day simulator)
+│
+MCP Server（汇总所有下游能力，Phase 2 收尾）
+└── P2-MCP-1 ← P2-Graph-1 + P2-Search-1 + P2-Fetch-3 + P2-Timeline-2
+
+Phase 3（依赖 Phase 2 核心能力）
+├── P3-UI-1 (React skeleton)  ←─┐
+├── P3-UI-2 (entity detail)  ← P3-UI-1
+├── P3-UI-3 (score panel)  ← P3-UI-1 + P2-History-2 + P2-Decay-3
+├── P3-UI-4 (graph viz)  ← P2-Graph-1 + P3-UI-1
+└── P3-UI-5 (PWA)  ← P3-UI-1
+```
+
+---
+
+## 9.16 工时汇总（Phase 2 最终版）
+
+| 任务线 | 任务数 | 总工时 | 优先级 |
+|--------|--------|--------|--------|
+| Entity List API | 1 | 4h | P0 |
+| Graph API | 4 | 16h | P0 / P1 |
+| Fetch Pipeline | 3 | 14h | P0 |
+| Semantic Search (FAISS) | 1 | 8h | P1 |
+| **L1 Timeline & Access** | 2 | **5h** | **P1** |
+| **L2 Score History** | 2 | **5h** | **P1** |
+| **L3 Insight Engine** | 3 | **13h** | **P2** |
+| **L4 Reference Intelligence** | 2 | **9h** | **P2** |
+| **L5 Decay Tuner** | 3 | **10h** | **P2** |
+| MCP Server | 1 | 6h | P3 |
+| **Phase 2 合计** | **24** | **90h** | |
+| Phase 3 Web UI | 5 | 36h | |
+
+---
+
+*Phase 2 + Phase 3 任务拆解完成。Section 9 现为完整 600+ 行可执行 TDD 文档，覆盖 Entity List / Graph / Fetch / Search / Timeline / Score History / Insight Engine / Reference Intelligence / Decay Tuner / MCP 共 10 条任务线。*
