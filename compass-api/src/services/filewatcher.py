@@ -32,6 +32,9 @@ Frontmatter expected fields
 from __future__ import annotations
 
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 import re
 import sys
 import threading
@@ -93,7 +96,8 @@ class ParsedFile:
         consensus: float,
         content: Optional[str],
         metadata: dict,
-    ):
+    ) -> None:
+        """Initialize a parsed file with all extracted frontmatter fields."""
         self.vault_path = vault_path
         self.entity_id = entity_id
         self.title = title
@@ -218,6 +222,7 @@ class EventQueue:
     """
 
     def __init__(self, delay: float = 0.5) -> None:
+        """Initialize with coalescing delay; uses a lock for thread-safe push from watchdog."""
         self.delay = delay
         self._events: dict[str, tuple[str, float]] = {}  # path → (type, timestamp)
         self._lock = threading.Lock()
@@ -266,6 +271,7 @@ class VaultHandler(FileSystemEventHandler):
     """Watches the vault root and enqueues events for any *.md change."""
 
     def __init__(self, vault_path: Path) -> None:
+        """Initialize with resolved vault root path for event path resolution."""
         self.vault_path = vault_path.resolve()
 
     def _md_path(self, path: str) -> Optional[str]:
@@ -313,7 +319,7 @@ async def scan_vault() -> list[ParsedFile]:
     vault = config.VAULT_PATH
     results: list[ParsedFile] = []
     if not vault.exists():
-        print(f"[FileWatcher] Vault not found: {vault}")
+        logger.warning(f"[FileWatcher] Vault not found: {vault}")
         return results
     for path in vault.rglob("*.md"):
         vp = str(path.relative_to(vault))
@@ -331,13 +337,13 @@ async def scan_vault() -> list[ParsedFile]:
 async def full_sync() -> None:
     """Full vault scan: upsert every file. Used on startup."""
     files = await scan_vault()
-    print(f"[FileWatcher] Full sync: {len(files)} files found")
+    logger.info(f"[FileWatcher] Full sync: {len(files)} files found")
     for parsed in files:
         try:
             await api_upsert(parsed)
-            print(f"  [synced]   {parsed.vault_path} → {parsed.entity_id}")
+            logger.info(f"  [synced]   {parsed.vault_path} → {parsed.entity_id}")
         except Exception as exc:
-            print(f"  [error]    {parsed.vault_path}: {exc}")
+            logger.error(f"  [error]    {parsed.vault_path}: {exc}")
 
 
 # ---- main loop ----
@@ -350,26 +356,26 @@ async def process_events(queue: EventQueue) -> None:
         for vault_path, etype in events:
             entity_id = vault_path_to_entity_id(vault_path)
             if etype == "delete":
-                print(f"[FileWatcher] delete {vault_path}")
+                logger.info(f"[FileWatcher] delete {vault_path}")
                 try:
                     await api_delete(entity_id)
                 except Exception as exc:
-                    print(f"  [error] delete {entity_id}: {exc}")
+                    logger.error(f"  [error] delete {entity_id}: {exc}")
             else:
                 # create or update — re-parse the file and upsert
                 full_path = config.VAULT_PATH / vault_path
                 if not full_path.exists():
-                    print(f"[FileWatcher] skip (gone) {vault_path}")
+                    logger.info(f"[FileWatcher] skip (gone) {vault_path}")
                     continue
                 parsed = parse_markdown_file(full_path, vault_path)
                 if not parsed:
-                    print(f"[FileWatcher] skip (parse error) {vault_path}")
+                    logger.warning(f"[FileWatcher] skip (parse error) {vault_path}")
                     continue
-                print(f"[FileWatcher] {etype} {vault_path} → {entity_id}")
+                logger.info(f"[FileWatcher] {etype} {vault_path} → {entity_id}")
                 try:
                     await api_upsert(parsed)
                 except Exception as exc:
-                    print(f"  [error] upsert {entity_id}: {exc}")
+                    logger.error(f"  [error] upsert {entity_id}: {exc}")
 
 
 def run_watcher() -> None:
@@ -385,7 +391,7 @@ def run_watcher() -> None:
     observer = Observer()
     observer.schedule(handler, str(vault), recursive=True)
     observer.start()
-    print(f"[FileWatcher] Watching {vault} (recursive)")
+    logger.info(f"[FileWatcher] Watching {vault} (recursive)")
 
     # Run the async event processor in the event loop
     try:

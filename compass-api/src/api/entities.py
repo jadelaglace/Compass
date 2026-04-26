@@ -1,8 +1,8 @@
 """REST endpoints for entity management."""
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from src import config
@@ -48,7 +48,7 @@ async def _compute_score_and_refs(
 
     Returns (score_data, ref_ids).
     """
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    now = datetime.now(tz=timezone.utc).isoformat()
     refs: list[str] = []
     if content:
         refs_result = await rust_client.parse_refs(content, current_id=entity_id)
@@ -80,6 +80,8 @@ async def _compute_score_and_refs(
 
 
 class EntityCreate(BaseModel):
+    """Schema for creating a new entity via POST /entities."""
+
     id: str
     title: str
     category: str = "Inbox"
@@ -93,6 +95,8 @@ class EntityCreate(BaseModel):
 
 
 class EntityResponse(BaseModel):
+    """Schema returned after creating or fetching an entity."""
+
     id: str
     title: str
     category: str
@@ -103,8 +107,9 @@ class EntityResponse(BaseModel):
 
 
 @router.post("", response_model=EntityResponse)
-async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) -> EntityResponse:
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(get_db)] = None) -> EntityResponse:
+    """Create a new entity with computed score and extracted refs."""
+    now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = entity.vault_path
     file_path = entity.file_path or str(config.VAULT_PATH / vault_path)
 
@@ -145,16 +150,30 @@ async def create_entity(entity: EntityCreate, db: Database = Depends(get_db)) ->
 
 
 @router.get("/search")
-async def search_entities(q: str, limit: int = 20, db: Database = Depends(get_db)) -> dict:
+async def search_entities(q: str, limit: int = 20, db: Annotated[Database, Depends(get_db)] = None) -> dict:
+    """Full-text search across entity titles and categories via FTS5."""
     results = await db.search_entities(q, limit=limit)
     return {"results": results, "count": len(results)}
 
 
 @router.get("/top")
 async def top_entities(
-    limit: int = 20, category: Optional[str] = None, db: Database = Depends(get_db)
+    limit: int = 20, category: Optional[str] = None, db: Annotated[Database, Depends(get_db)] = None
 ) -> dict:
+    """Return top-scoring entities, optionally filtered by category."""
     results = await db.get_top_entities(limit=limit, category=category)
+    return {"results": results, "count": len(results)}
+
+
+@router.get("")
+async def list_entities(
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    category: Optional[str] = None,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """List all entities without requiring a query, supports pagination and category filter."""
+    results = await db.get_all_entities(limit=limit, offset=offset, category=category)
     return {"results": results, "count": len(results)}
 
 
@@ -162,7 +181,7 @@ async def top_entities(
 async def update_entity(
     entity_id: str,
     update: EntityCreate,
-    db: Database = Depends(get_db)
+    db: Annotated[Database, Depends(get_db)] = None
 ) -> EntityResponse:
     """Full update: re-parses content for refs, recomputes scores.
 
@@ -179,9 +198,13 @@ async def update_entity(
             detail=f"ID mismatch: body has '{update.id}', URL has '{entity_id}'",
         )
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = update.vault_path
-    file_path = update.file_path or str(config.VAULT_PATH / vault_path)
+    # Preserve existing file_path when not explicitly provided in the update.
+    # update.file_path=None means "don't change" (use stored value).
+    file_path = (
+        update.file_path if update.file_path is not None else existing["file_path"]
+    )
 
     score_data, refs = await _compute_score_and_refs(
         update.interest, update.strategy, update.consensus, update.content, entity_id
@@ -226,7 +249,7 @@ async def update_entity(
 
 
 @router.delete("/{entity_id}")
-async def delete_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
+async def delete_entity(entity_id: str, db: Annotated[Database, Depends(get_db)] = None) -> dict:
     """Delete entity and all associated data (scores, refs, events).
 
     Used by FileWatcher when a vault file is removed.
@@ -250,7 +273,8 @@ async def delete_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
 
 
 @router.get("/{entity_id}")
-async def get_entity(entity_id: str, db: Database = Depends(get_db)) -> dict:
+async def get_entity(entity_id: str, db: Annotated[Database, Depends(get_db)] = None) -> dict:
+    """Fetch a single entity by ID with its incoming and outgoing references."""
     entity = await db.get_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")

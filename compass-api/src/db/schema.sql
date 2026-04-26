@@ -22,14 +22,14 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE TABLE IF NOT EXISTS scores (
     entity_id                   TEXT PRIMARY KEY REFERENCES entities(id),
     interest                     REAL DEFAULT 5.0,
-    strategy                      REAL DEFAULT 5.0,
-    consensus                     REAL DEFAULT 0.0,
+    strategy                     REAL DEFAULT 5.0,
+    consensus                    REAL DEFAULT 0.0,
     final_score                  REAL DEFAULT 0.0,
-    interest_half_life_days       REAL DEFAULT 30.0,
-    strategy_half_life_days       REAL DEFAULT 365.0,
-    consensus_half_life_days      REAL DEFAULT 60.0,
-    manual_override               INTEGER DEFAULT 0,
-    updated_at                    TEXT NOT NULL
+    interest_half_life_days      REAL DEFAULT 30.0,
+    strategy_half_life_days      REAL DEFAULT 365.0,
+    consensus_half_life_days     REAL DEFAULT 60.0,
+    manual_override              INTEGER DEFAULT 0,
+    updated_at                   TEXT NOT NULL
 );
 
 -- Bidirectional references
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     created_at  TEXT NOT NULL
 );
 
--- FTS5 full-text search (plain — triggers handle sync manually)
+-- FTS5 full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
     id,
     title,
@@ -66,7 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_references_source ON "references"(source_id);
 CREATE INDEX IF NOT EXISTS idx_references_target ON "references"(target_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_entity ON timeline_events(entity_id);
 
--- FTS5 sync triggers (keep full-text index consistent with entities table)
+-- FTS5 sync triggers
+-- NOTE: FTS5 plain tables support DELETE statements directly
 CREATE TRIGGER IF NOT EXISTS entities_fts_insert
 AFTER INSERT ON entities BEGIN
     INSERT INTO entities_fts(id, title, category)
@@ -75,14 +76,12 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS entities_fts_delete
 AFTER DELETE ON entities BEGIN
-    INSERT INTO entities_fts(entities_fts, id, title, category)
-    VALUES ('delete', old.id, old.title, old.category);
+    DELETE FROM entities_fts WHERE id = old.id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS entities_fts_update
 AFTER UPDATE ON entities BEGIN
-    INSERT INTO entities_fts(entities_fts, id, title, category)
-    VALUES ('delete', old.id, old.title, old.category);
+    DELETE FROM entities_fts WHERE id = old.id;
     INSERT INTO entities_fts(id, title, category)
     VALUES (new.id, new.title, new.category);
 END;

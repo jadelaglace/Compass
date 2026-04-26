@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -16,17 +17,23 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # ---- FTS query sanitizer ----
 
 _ESCAPE_CHARS = str.maketrans({
-    '"': '""',   # phrase delimiter — escape for FTS5
-    "*": " ",    # prefix wildcard — strip (prevents open-ended prefix matching)
-    "(": " ",
-    ")": " ",
+    # SQL / FTS5 injection prevention
+    '"': "",     # double-quote stripped (phrase delimiter, not SQL-safe here)
+    "'": "",     # single-quote stripped (SQL string injection prevention)
+    "(": "",
+    ")": "",
+    # FTS5 operator stripping (treat user input as plain tokens)
+    "*": " ",    # prefix wildcard
     "-": " ",    # negation operator
-    "+": " ",
-    "^": " ",
-    ":": " ",
+    "+": " ",    # explicit AND operator
+    "^": " ",    # XOR operator
+    ":": " ",    # column filter
     "{": " ",
     "}": " ",
-    "~": " ",
+    "~": " ",    # approximate match
+    "[": " ",
+    "]": " ",
+    "!": " ",    # NOT shortcut in some FTS5 dialects
 })
 
 
@@ -37,12 +44,19 @@ def _escape_fts_query(raw: str) -> str:
     "phrase" delimiters, etc.).  User input passed raw can alter query semantics
     or cause errors.  Escape all FTS operators so they become plain tokens.
     """
+    # Reject oversized input before any processing.
+    if len(raw) > 200:
+        raise ValueError("Query exceeds maximum length of 200 characters")
     # Strip leading/trailing whitespace; collapse internal runs of spaces.
     token = " ".join(raw.split())
     if not token:
         return '""'  # empty query → match-nothing (safer than match-all)
     # Escape special FTS characters; wrap as phrase to prevent tokenization issues.
     escaped = token.translate(_ESCAPE_CHARS)
+    # Strip FTS5 boolean keywords (word-level, case-insensitive) so user
+    # text is always treated as literal tokens, never as search operators.
+    for kw in ("AND", "OR", "NOT"):
+        escaped = re.sub(rf"\b{kw}\b", " ", escaped, flags=re.IGNORECASE)
     # Collapse any resulting double-spaces left by removed operators.
     return " ".join(escaped.split())
 
@@ -71,19 +85,23 @@ class Database:
     """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
+        """Initialize with optional path; connection is created on connect()."""
         self.db_path = db_path or cfg.DB_PATH
         self._conn: Optional[aiosqlite.Connection] = None
 
     async def connect(self) -> None:
+        """Open the SQLite connection and initialize the schema via init_db."""
         self._conn = await init_db(self.db_path)
 
     async def close(self) -> None:
+        """Close the SQLite connection."""
         if self._conn:
             await self._conn.close()
             self._conn = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
+        """Return the active connection, raising if not yet connected."""
         if self._conn is None:
             raise RuntimeError("Database not connected — call .connect() first")
         return self._conn
@@ -178,7 +196,7 @@ class Database:
         """Insert a reference (source→target). FK check disabled intentionally:
         target may not exist yet (forward link to future note).
         Caller manages transaction."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(tz=timezone.utc).isoformat()
         await self.conn.execute("PRAGMA foreign_keys=OFF")
         try:
             await self.conn.execute(
@@ -193,7 +211,7 @@ class Database:
         self, entity_id: str, event_type: str, trigger: Optional[str] = None
     ) -> None:
         """Log a timeline event. Caller manages transaction."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(tz=timezone.utc).isoformat()
         await self.conn.execute(
             "INSERT INTO timeline_events (entity_id, event_type, trigger, created_at) VALUES (?, ?, ?, ?)",
             (entity_id, event_type, trigger, now),
@@ -227,17 +245,42 @@ class Database:
     # ---- read operations ----
 
     async def get_entity(self, entity_id: str) -> Optional[dict[str, Any]]:
+        """Fetch an entity row by ID, or None if not found."""
         async with self.conn.execute(
             "SELECT * FROM entities WHERE id = ?", (entity_id,)
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def get_all_entities(
+        self, limit: int = 100, offset: int = 0, category: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """List all entities with optional pagination and category filter."""
+        q = """
+            SELECT e.*, s.final_score
+            FROM entities e
+            LEFT JOIN scores s ON s.entity_id = e.id
+        """
+        params: list[Any] = []
+        if category:
+            q += " WHERE e.category = ?"
+            params.append(category)
+        q += " ORDER BY e.updated_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cur = await self.conn.execute(q, params)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def search_entities(
         self, query: str, limit: int = 20
     ) -> list[dict[str, Any]]:
-        # FTS5 MATCH injection guard: escape FTS5 query operators so user input
-        # is treated as a literal token/phrase, not a search expression.
+        """Full-text search via FTS5 — returns ranked entity rows with scores."""
+        # FTS5 MATCH injection guard: _escape_fts_query strips:
+        #   - single-quote (SQL string literal injection)
+        #   - double-quote (phrase delimiter / SQL safety)
+        #   - all FTS5 operators (*+-^:(){}~)
+        #   - enforces 200-char max length
+        # LIMIT is fully parameterised (? placeholder).
         # Note: MATCH clause must use string interpolation (not ? placeholder) —
         # SQLite FTS5 does not support parameterised MATCH expressions.
         safe_q = _escape_fts_query(query)
@@ -259,6 +302,7 @@ class Database:
     async def get_top_entities(
         self, limit: int = 20, category: Optional[str] = None
     ) -> list[dict[str, Any]]:
+        """Return the top-scoring entities, optionally filtered by category."""
         # LEFT JOIN + ORDER BY nullable column: filter NULLs for stable sort.
         # SQLite's NULL ordering is implementation-defined; exclude rows
         # without a score to keep ordering deterministic.
@@ -306,6 +350,7 @@ _db_instance: Database | None = None
 
 
 def set_db(db: Database) -> None:
+    """Register the global Database instance for use by FastAPI's get_db dependency."""
     global _db_instance
     _db_instance = db
 
@@ -315,3 +360,4 @@ def get_db() -> Database:
     if _db_instance is None:
         raise RuntimeError("Database not initialized — call set_db() first")
     return _db_instance
+

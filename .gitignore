@@ -26,3 +26,7 @@ data/
 *.db-shm
 *.db-wal
 .env
+
+# Local vault (user-specific knowledge base content)
+vault/
+uv.lock
