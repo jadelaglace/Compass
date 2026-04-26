@@ -252,6 +252,25 @@ class Database:
             row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def get_all_entities(
+        self, limit: int = 100, offset: int = 0, category: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """List all entities with optional pagination and category filter."""
+        q = """
+            SELECT e.*, s.final_score
+            FROM entities e
+            LEFT JOIN scores s ON s.entity_id = e.id
+        """
+        params: list[Any] = []
+        if category:
+            q += " WHERE e.category = ?"
+            params.append(category)
+        q += " ORDER BY e.updated_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cur = await self.conn.execute(q, params)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def search_entities(
         self, query: str, limit: int = 20
     ) -> list[dict[str, Any]]:

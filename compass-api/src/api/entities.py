@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from src import config
@@ -162,6 +162,18 @@ async def top_entities(
 ) -> dict:
     """Return top-scoring entities, optionally filtered by category."""
     results = await db.get_top_entities(limit=limit, category=category)
+    return {"results": results, "count": len(results)}
+
+
+@router.get("")
+async def list_entities(
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    category: Optional[str] = None,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """List all entities without requiring a query, supports pagination and category filter."""
+    results = await db.get_all_entities(limit=limit, offset=offset, category=category)
     return {"results": results, "count": len(results)}
 
 
