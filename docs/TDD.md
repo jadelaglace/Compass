@@ -1,11 +1,11 @@
-# Compass Phase 1 — Technical Design Document
+# Compass Technical Design Document
 
 | 字段 | 内容 |
 |------|------|
-| 版本 | v2.0 |
-| 日期 | 2026-04-06 |
+| 版本 | v2.1 |
+| 日期 | 2026-04-27 |
 | 作者 | CTO (太子) |
-| 状态 | 正式接手，待团队评审 |
+| 状态 | Phase 2 开发就绪 |
 
 ---
 
