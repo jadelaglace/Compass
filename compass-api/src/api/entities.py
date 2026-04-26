@@ -165,6 +165,18 @@ async def top_entities(
     return {"results": results, "count": len(results)}
 
 
+@router.get("")
+async def list_entities(
+    limit: int = 100,
+    offset: int = 0,
+    category: Optional[str] = None,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """List all entities without requiring a query, supports pagination and category filter."""
+    results = await db.get_all_entities(limit=limit, offset=offset, category=category)
+    return {"results": results, "count": len(results)}
+
+
 @router.put("/{entity_id}", response_model=EntityResponse)
 async def update_entity(
     entity_id: str,
