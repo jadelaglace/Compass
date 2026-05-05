@@ -168,6 +168,19 @@ async def preview_decay(
     current_score = score.get("final_score", 0.0)
     future_score = round(score_result.final_score, 2)
 
+    # Compute per-component decayed values using exponential decay formula
+    # Rust binary returns final_score + days_elapsed; we derive component decay
+    days_elapsed = score_result.days_elapsed
+    interest_hl = float(score.get("interest_half_life_days", 30.0))
+    strategy_hl = float(score.get("strategy_half_life_days", 365.0))
+    consensus_hl = float(score.get("consensus_half_life_days", 60.0))
+    interest_init = float(score.get("interest", 5.0))
+    strategy_init = float(score.get("strategy", 5.0))
+    consensus_init = float(score.get("consensus", 0.0))
+    interest_decayed = interest_init * (0.5 ** (days_elapsed / interest_hl))
+    strategy_decayed = strategy_init * (0.5 ** (days_elapsed / strategy_hl))
+    consensus_decayed = consensus_init * (0.5 ** (days_elapsed / consensus_hl))
+
     return DecayPreviewResponse(
         entity_id=entity_id,
         current_score=round(current_score, 2),
@@ -175,9 +188,9 @@ async def preview_decay(
         days_elapsed=days,
         days_remaining=round(score_result.days_elapsed, 1),
         decayed_components={
-            "interest": round(score_result.interest_decayed, 4),
-            "strategy": round(score_result.strategy_decayed, 4),
-            "consensus": round(score_result.consensus_decayed, 4),
+            "interest": round(interest_decayed, 4),
+            "strategy": round(strategy_decayed, 4),
+            "consensus": round(consensus_decayed, 4),
         },
     )
 
@@ -257,13 +270,14 @@ async def simulate_decay(
             strategy_half_life_days=strategy_hl,
             consensus_half_life_days=consensus_hl,
         )
+        days_e = result.days_elapsed
         trajectory.append(SimulatorEntry(
             day=step,
             date=future_dt.strftime("%Y-%m-%d"),
             final_score=round(result.final_score, 2),
-            interest=round(result.interest_decayed, 4),
-            strategy=round(result.strategy_decayed, 4),
-            consensus=round(result.consensus_decayed, 4),
+            interest=round(interest_val * (0.5 ** (days_e / interest_hl)), 4),
+            strategy=round(strategy_val * (0.5 ** (days_e / strategy_hl)), 4),
+            consensus=round(consensus_val * (0.5 ** (days_e / consensus_hl)), 4),
         ))
 
     start_score = trajectory[0].final_score
