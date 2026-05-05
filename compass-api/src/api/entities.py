@@ -1,5 +1,5 @@
 """REST endpoints for entity management."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -482,3 +482,117 @@ async def record_access(
         accessed_at=now_str,
         decay_updated=True,
     )
+
+
+# ---- Timeline-2: GET /entities/timeline ----
+
+class TimelineItem(BaseModel):
+    entity_id: str
+    title: str
+    category: str
+    event_type: str
+    event_trigger: Optional[str]
+    created_at: str
+
+
+class TimelineResponse(BaseModel):
+    items: list[TimelineItem]
+    total: int
+    has_more: bool
+
+
+@router.get("/timeline", response_model=TimelineResponse)
+async def get_entities_timeline(
+    start: Annotated[str, Query(description="ISO datetime start of time window")],
+    end: Annotated[
+        Optional[str],
+        Query(description="ISO datetime end of time window (defaults to now)"),
+    ] = None,
+    event_type: Annotated[
+        Optional[str],
+        Query(description="Filter by event type"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> TimelineResponse:
+    """Return entities with timeline events in a time range.
+
+    Shows the most recent event per entity within the window.
+    """
+    # Parse datetimes
+    try:
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid start datetime format")
+
+    if end:
+        try:
+            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid end datetime format")
+    else:
+        end_dt = datetime.now(tz=timezone.utc)
+
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="end must be after start")
+
+    # Build query — latest event per entity
+    params: list[Any] = [start_dt.isoformat(), end_dt.isoformat()]
+
+    event_filter = ""
+    if event_type:
+        event_filter = " AND te.event_type = ?"
+        params.append(event_type)
+
+    # Count total unique entities with matching events
+    count_sql = f"""
+        SELECT COUNT(DISTINCT te.entity_id)
+        FROM timeline_events te
+        JOIN entities e ON e.id = te.entity_id
+        WHERE te.created_at >= ? AND te.created_at <= ?{event_filter}
+    """
+    async with db.conn.execute(count_sql, params) as cur:
+        total = (await cur.fetchone())[0]
+
+    # Paginated items — latest event per entity
+    paginated_sql = f"""
+        WITH ranked AS (
+            SELECT
+                te.entity_id,
+                te.event_type,
+                te.trigger,
+                te.created_at,
+                e.title,
+                e.category,
+                ROW_NUMBER() OVER (
+                    PARTITION BY te.entity_id
+                    ORDER BY te.created_at DESC
+                ) AS rn
+            FROM timeline_events te
+            JOIN entities e ON e.id = te.entity_id
+            WHERE te.created_at >= ? AND te.created_at <= ?{event_filter}
+        )
+        SELECT entity_id, title, category, event_type, trigger, created_at
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+    async with db.conn.execute(paginated_sql, params) as cur:
+        rows = await cur.fetchall()
+
+    items = [
+        TimelineItem(
+            entity_id=row["entity_id"],
+            title=row["title"],
+            category=row["category"],
+            event_type=row["event_type"],
+            event_trigger=row["trigger"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+    has_more = (offset + limit) < total
+    return TimelineResponse(items=items, total=total, has_more=has_more)

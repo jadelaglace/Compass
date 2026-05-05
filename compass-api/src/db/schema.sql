@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     entity_id   TEXT NOT NULL REFERENCES entities(id),
     event_type  TEXT NOT NULL,
     trigger     TEXT,
+    metadata    TEXT,
     created_at  TEXT NOT NULL
 );
 
@@ -82,6 +83,21 @@ CREATE TABLE IF NOT EXISTS score_history (
     reason       TEXT NOT NULL,
     created_at   TEXT NOT NULL
 );
+
+-- Insights
+CREATE TABLE IF NOT EXISTS insights (
+    id              TEXT PRIMARY KEY,
+    entity_id       TEXT NOT NULL REFERENCES entities(id),
+    title           TEXT NOT NULL,
+    content         TEXT,
+    maturity        TEXT NOT NULL DEFAULT 'seedling',
+    source_type     TEXT DEFAULT 'auto',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_insights_entity ON insights(entity_id);
+CREATE INDEX IF NOT EXISTS idx_insights_maturity ON insights(maturity);
 
 -- FTS5 full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(

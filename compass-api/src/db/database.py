@@ -207,14 +207,83 @@ class Database:
             await self.conn.execute("PRAGMA foreign_keys=ON")
         # NOTE: no commit() here — caller controls transaction
 
+    async def get_insight(self, insight_id: str) -> Optional[dict[str, Any]]:
+        """Fetch an insight row by ID, or None if not found."""
+        async with self.conn.execute(
+            "SELECT * FROM insights WHERE id = ?", (insight_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_insight(self, data: dict[str, Any]) -> None:
+        """Insert or update an insight. Caller manages transaction."""
+        await self.conn.execute(
+            """
+            INSERT INTO insights (id, entity_id, title, content, maturity, source_type, created_at, updated_at)
+            VALUES (:id, :entity_id, :title, :content, :maturity, :source_type, :created_at, :updated_at)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                content = excluded.content,
+                maturity = excluded.maturity,
+                updated_at = excluded.updated_at
+            """,
+            {
+                "id": data["id"],
+                "entity_id": data["entity_id"],
+                "title": data["title"],
+                "content": data.get("content"),
+                "maturity": data.get("maturity", "seedling"),
+                "source_type": data.get("source_type", "auto"),
+                "created_at": data["created_at"],
+                "updated_at": data["updated_at"],
+            },
+        )
+
+    async def list_insights(
+        self,
+        maturity: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return paginated list of insights with optional maturity filter.
+
+        Returns (items, total_count).
+        """
+        conditions = []
+        params: list[Any] = []
+
+        if maturity:
+            conditions.append("maturity = ?")
+            params.append(maturity)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        count_sql = f"SELECT COUNT(*) FROM insights WHERE {where_clause}"
+        async with self.conn.execute(count_sql, params) as cur:
+            total = (await cur.fetchone())[0]
+
+        sql = f"""
+            SELECT id, entity_id, title, maturity, source_type, created_at, updated_at
+            FROM insights
+            WHERE {where_clause}
+            ORDER BY updated_at DESC
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        async with self.conn.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+
+        return [dict(row) for row in rows], total
+
     async def log_event(
-        self, entity_id: str, event_type: str, trigger: Optional[str] = None
+        self, entity_id: str, event_type: str, trigger: Optional[str] = None, extra: Optional[dict] = None
     ) -> None:
         """Log a timeline event. Caller manages transaction."""
         now = datetime.now(tz=timezone.utc).isoformat()
+        meta = json.dumps(extra) if extra else None
         await self.conn.execute(
-            "INSERT INTO timeline_events (entity_id, event_type, trigger, created_at) VALUES (?, ?, ?, ?)",
-            (entity_id, event_type, trigger, now),
+            "INSERT INTO timeline_events (entity_id, event_type, trigger, created_at, metadata) VALUES (?, ?, ?, ?, ?)",
+            (entity_id, event_type, trigger, now, meta),
         )
         # NOTE: no commit() here — caller controls transaction
 

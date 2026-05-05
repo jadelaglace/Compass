@@ -1,7 +1,8 @@
 """REST endpoint: graph neighbor queries."""
+from typing import Annotated, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional
 
 from src.db.database import Database, get_db
 

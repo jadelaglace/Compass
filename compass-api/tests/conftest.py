@@ -39,6 +39,8 @@ async def db(db_path: Path):
     set_db(database)
     yield database
     await conn.close()
+    # Wipe DB file so next test gets fresh state
+    db_path.unlink(missing_ok=True)
 
 
 @pytest.fixture
