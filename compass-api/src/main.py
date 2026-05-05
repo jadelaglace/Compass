@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from src import config
 from src.db.database import Database, set_db
-from src.api import entities, scores, feed, agent
+from src.api import entities, scores, feed, agent, graph
 
 # Global DB — initialized once at startup
 db = Database()
@@ -39,6 +39,7 @@ app.include_router(entities.router)
 app.include_router(scores.router)
 app.include_router(feed.router)
 app.include_router(agent.router)
+app.include_router(graph.router)
 
 
 @app.get("/health")
