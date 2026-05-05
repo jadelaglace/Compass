@@ -395,3 +395,90 @@ async def get_score_history(
         "min_value": min(values) if values else 0.0,
         "max_value": max(values) if values else 0.0,
     }
+
+
+# ---- Timeline-1: PATCH /entities/{id}/access ----
+
+ACCESS_DEBOUNCE_SECONDS = 300  # 5 minutes
+
+
+class AccessResponse(BaseModel):
+    entity_id: str
+    access_count: int
+    accessed_at: str
+    decay_updated: bool
+
+
+@router.patch("/{entity_id}/access", response_model=AccessResponse)
+async def record_access(
+    entity_id: str,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> AccessResponse:
+    """Record an entity access with 5-min debounce and decay recalculation."""
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    now = datetime.now(tz=timezone.utc)
+    now_str = now.isoformat()
+    last_boosted_str = entity.get("last_boosted_at")
+
+    # Debounce: skip count bump if last access within 5 minutes
+    if last_boosted_str:
+        try:
+            from datetime import timedelta
+            last_boosted = datetime.fromisoformat(last_boosted_str.replace("Z", "+00:00"))
+            if (now - last_boosted).total_seconds() < ACCESS_DEBOUNCE_SECONDS:
+                return AccessResponse(
+                    entity_id=entity_id,
+                    access_count=entity.get("access_count", 0) or 0,
+                    accessed_at=last_boosted.isoformat(),
+                    decay_updated=False,
+                )
+        except Exception:
+            pass
+
+    # Get current scores for decay recalculation
+    score_row = await db.conn.execute(
+        "SELECT interest, strategy, consensus FROM scores WHERE entity_id = ?",
+        (entity_id,),
+    )
+    score = await score_row.fetchone()
+    interest = float(score["interest"]) if score else 5.0
+    strategy = float(score["strategy"]) if score else 5.0
+    consensus = float(score["consensus"]) if score else 0.0
+
+    # Recalculate decay with fresh timestamp
+    result = await rust_client.compute_score(
+        interest=interest, strategy=strategy, consensus=consensus, last_boosted_at=now_str,
+    )
+    new_final = round(result.final_score, 2)
+
+    # Update metadata access_count
+    import json
+    meta = json.loads(entity.get("metadata") or "{}")
+    new_count = (meta.get("access_count") or 0) + 1
+    meta["access_count"] = new_count
+
+    await db.begin()
+    try:
+        await db.conn.execute(
+            "UPDATE entities SET last_boosted_at = ?, metadata = ? WHERE id = ?",
+            (now_str, json.dumps(meta), entity_id),
+        )
+        await db.conn.execute(
+            "UPDATE scores SET final_score = ?, updated_at = ? WHERE entity_id = ?",
+            (new_final, now_str, entity_id),
+        )
+        await db.log_event(entity_id, "accessed", trigger="api")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    return AccessResponse(
+        entity_id=entity_id,
+        access_count=new_count,
+        accessed_at=now_str,
+        decay_updated=True,
+    )
