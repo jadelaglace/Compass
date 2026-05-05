@@ -192,16 +192,16 @@ class Database:
         )
         # NOTE: no commit() here — caller controls transaction
 
-    async def upsert_reference(self, source_id: str, target_id: str) -> None:
-        """Insert a reference (source→target). FK check disabled intentionally:
+    async def upsert_reference(self, source_id: str, target_id: str, strength: float = 1.0) -> None:
+        """Insert a reference (source→target) with given strength. FK check disabled intentionally:
         target may not exist yet (forward link to future note).
         Caller manages transaction."""
         now = datetime.now(tz=timezone.utc).isoformat()
         await self.conn.execute("PRAGMA foreign_keys=OFF")
         try:
             await self.conn.execute(
-                'INSERT OR IGNORE INTO "references" (source_id, target_id, created_at) VALUES (?, ?, ?)',
-                (source_id, target_id, now),
+                'INSERT OR IGNORE INTO "references" (source_id, target_id, strength, created_at) VALUES (?, ?, ?, ?)',
+                (source_id, target_id, strength, now),
             )
         finally:
             await self.conn.execute("PRAGMA foreign_keys=ON")
@@ -293,18 +293,19 @@ class Database:
         self,
         entity_data: dict[str, Any],
         score_data: dict[str, Any],
-        ref_ids: list[str],
+        ref_entries: list[tuple[str, float]],
         event_type: str = "created",
         event_trigger: str = "api",
     ) -> None:
         """Atomically create entity + score + references + event in one transaction.
+        ref_entries: list of (target_id, strength) tuples.
         Raises on any failure; rolls back entirely on error."""
         await self.begin()
         try:
             await self.upsert_entity(entity_data)
             await self.upsert_score(score_data)
-            for ref_id in ref_ids:
-                await self.upsert_reference(entity_data["id"], ref_id)
+            for target_id, strength in ref_entries:
+                await self.upsert_reference(entity_data["id"], target_id, strength)
             await self.log_event(entity_data["id"], event_type, event_trigger)
             await self.commit()
         except Exception:

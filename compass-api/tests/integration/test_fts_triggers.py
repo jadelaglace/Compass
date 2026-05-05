@@ -67,7 +67,7 @@ async def test_fts_insert_trigger(tmp_path):
         await db.create_entity_full(
             _entity("compass-v2", "Compass Version Two"),
             _score("compass-v2"),
-            ref_ids=[],
+            ref_entries=[],
         )
 
         results = await _fts_search(db, "Compass")
@@ -90,7 +90,7 @@ async def test_fts_delete_trigger(tmp_path):
         await db.create_entity_full(
             _entity("to-delete", "Entity To Delete"),
             _score("to-delete"),
-            ref_ids=[],
+            ref_entries=[],
         )
 
         # Confirm it's indexed
@@ -122,7 +122,7 @@ async def test_fts_update_trigger(tmp_path):
         await db.create_entity_full(
             _entity("update-me", "Old Title Keyword"),
             _score("update-me"),
-            ref_ids=[],
+            ref_entries=[],
         )
 
         # Confirm old title is indexed
@@ -159,12 +159,12 @@ async def test_fts_multiple_entities_isolation(tmp_path):
         await db.create_entity_full(
             _entity("keep-me", "Keeper Entity Alpha"),
             _score("keep-me"),
-            ref_ids=[],
+            ref_entries=[],
         )
         await db.create_entity_full(
             _entity("remove-me", "Removable Entity Beta"),
             _score("remove-me"),
-            ref_ids=[],
+            ref_entries=[],
         )
 
         # Delete only the second entity (FK order: refs → events → scores → entity)
