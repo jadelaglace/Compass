@@ -324,6 +324,14 @@ class Database:
 
     # ---- read operations ----
 
+    async def get_score(self, entity_id: str) -> Optional[dict[str, Any]]:
+        """Fetch a score row by entity_id, or None if not found."""
+        async with self.conn.execute(
+            "SELECT * FROM scores WHERE entity_id = ?", (entity_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
     async def get_entity(self, entity_id: str) -> Optional[dict[str, Any]]:
         """Fetch an entity row by ID, or None if not found."""
         async with self.conn.execute(
