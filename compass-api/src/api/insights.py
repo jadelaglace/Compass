@@ -121,12 +121,47 @@ async def list_insights(
     maturity: Annotated[Optional[str], Query(description="Filter by maturity")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
+    format: Annotated[Optional[str], Query(description="Format for export: export|markdown")] = None,
     db: Annotated[Database, Depends(get_db)] = None,
-) -> InsightListResponse:
+) -> InsightListResponse | dict:
     if maturity is not None and maturity not in ("seedling", "sprout", "mature"):
         raise HTTPException(status_code=422, detail="Invalid maturity value")
+    if format is not None and format not in ("export", "markdown"):
+        raise HTTPException(status_code=422, detail="format must be export or markdown")
 
     items, total = await db.list_insights(maturity=maturity, limit=limit, offset=offset)
+
+    if format == "export":
+        return {
+            "format": "json",
+            "total": total,
+            "items": [
+                {
+                    "id": item["id"],
+                    "entity_id": item["entity_id"],
+                    "title": item["title"],
+                    "content": item.get("content"),
+                    "maturity": item["maturity"],
+                    "source_type": item["source_type"],
+                    "created_at": item["created_at"],
+                    "updated_at": item["updated_at"],
+                }
+                for item in items
+            ],
+        }
+
+    if format == "markdown":
+        lines = ["# Insights Export\n\n"]
+        for item in items:
+            lines.append(f"## {item['title']}\n")
+            lines.append(f"**ID:** `{item['id']}`  **Maturity:** {item['maturity']}\n")
+            lines.append(f"**Entity:** `{item['entity_id']}`  **Source:** {item['source_type']}\n")
+            lines.append(f"Created: {item['created_at']}  Updated: {item['updated_at']}\n")
+            if item.get("content"):
+                lines.append(f"\n{item['content']}\n")
+            lines.append("---\n")
+        return {"format": "markdown", "content": "".join(lines)}
+
     has_more = (offset + limit) < total
     return InsightListResponse(
         items=[InsightListItem(**item) for item in items],
