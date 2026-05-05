@@ -106,6 +106,28 @@ class EntityResponse(BaseModel):
     updated_at: str
 
 
+class EntityListItem(BaseModel):
+    """Single item in GET /entities response."""
+
+    id: str
+    title: str
+    entity_type: str
+    category: str
+    vault_path: str
+    final_score: float
+    tags: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class EntityListResponse(BaseModel):
+    """Response schema for GET /entities."""
+
+    items: list[EntityListItem]
+    total: int
+    has_more: bool
+
+
 @router.post("", response_model=EntityResponse)
 async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(get_db)] = None) -> EntityResponse:
     """Create a new entity with computed score and extracted refs."""
@@ -165,16 +187,47 @@ async def top_entities(
     return {"results": results, "count": len(results)}
 
 
-@router.get("")
+@router.get("", response_model=EntityListResponse)
 async def list_entities(
-    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    category: Optional[str] = None,
+    type: Annotated[
+        Optional[str],
+        Query(description="实体类型：knowledge | case | log | insight"),
+    ] = None,
+    min_score: Annotated[
+        float,
+        Query(ge=0, le=100, description="最低综合分数"),
+    ] = 0.0,
+    tags: Annotated[
+        Optional[list[str]],
+        Query(description="标签过滤（AND 逻辑）"),
+    ] = None,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=100, description="每页条数"),
+    ] = 20,
+    offset: Annotated[
+        int,
+        Query(ge=0, description="偏移量"),
+    ] = 0,
     db: Annotated[Database, Depends(get_db)] = None,
-) -> dict:
-    """List all entities without requiring a query, supports pagination and category filter."""
-    results = await db.get_all_entities(limit=limit, offset=offset, category=category)
-    return {"results": results, "count": len(results)}
+) -> EntityListResponse:
+    """List all entities with optional filters and pagination."""
+    if type is not None and type not in ("knowledge", "case", "log", "insight"):
+        raise HTTPException(status_code=422, detail="Invalid entity_type")
+
+    items, total = await db.list_entities(
+        entity_type=type,
+        min_score=min_score,
+        tags=tags,
+        limit=limit,
+        offset=offset,
+    )
+    has_more = (offset + limit) < total
+    return EntityListResponse(
+        items=[EntityListItem(**item) for item in items],
+        total=total,
+        has_more=has_more,
+    )
 
 
 @router.put("/{entity_id}", response_model=EntityResponse)
