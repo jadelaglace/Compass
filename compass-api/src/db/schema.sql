@@ -2,6 +2,12 @@
 -- FTS5 + sync triggers + indexes
 -- NOTE: PRAGMA journal_mode=WAL and PRAGMA foreign_keys=ON are set in init_db(),
 --       not here, to avoid pragma parsing issues in executescript().
+--
+-- Phase 2 Schema Foundation (Issue #73):
+--   - entity_type, status, parent_id, maturity, maturity_history on entities
+--   - taggings table
+--   - strength on references
+--   - score_history table
 
 -- Entities (one per Obsidian note)
 CREATE TABLE IF NOT EXISTS entities (
@@ -9,7 +15,12 @@ CREATE TABLE IF NOT EXISTS entities (
     file_path       TEXT NOT NULL UNIQUE,
     vault_path      TEXT NOT NULL,
     title           TEXT NOT NULL,
+    entity_type     TEXT NOT NULL DEFAULT 'knowledge',
     category        TEXT NOT NULL DEFAULT 'Inbox',
+    status          TEXT NOT NULL DEFAULT 'active',
+    parent_id       TEXT REFERENCES entities(id),
+    maturity        TEXT NOT NULL DEFAULT 'seedling',
+    maturity_history TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     last_boosted_at TEXT,
@@ -39,6 +50,7 @@ CREATE TABLE IF NOT EXISTS "references" (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id   TEXT NOT NULL REFERENCES entities(id),
     target_id   TEXT NOT NULL,
+    strength    REAL DEFAULT 1.0,
     created_at  TEXT NOT NULL,
     UNIQUE(source_id, target_id)
 );
@@ -52,26 +64,53 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     created_at  TEXT NOT NULL
 );
 
+-- Tags / label associations
+CREATE TABLE IF NOT EXISTS taggings (
+    entity_id   TEXT NOT NULL REFERENCES entities(id),
+    tag         TEXT NOT NULL,
+    PRIMARY KEY (entity_id, tag)
+);
+
+-- Score history for trend tracking
+CREATE TABLE IF NOT EXISTS score_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id    TEXT NOT NULL REFERENCES entities(id),
+    interest     REAL,
+    strategy     REAL,
+    consensus    REAL,
+    final_score  REAL,
+    reason       TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+
 -- FTS5 full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
     id,
     title,
+    entity_type,
     category
 );
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_entities_category ON entities(category);
+CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status);
+CREATE INDEX IF NOT EXISTS idx_entities_maturity ON entities(maturity);
 CREATE INDEX IF NOT EXISTS idx_scores_final_score ON scores(final_score DESC);
 CREATE INDEX IF NOT EXISTS idx_references_source ON "references"(source_id);
 CREATE INDEX IF NOT EXISTS idx_references_target ON "references"(target_id);
+CREATE INDEX IF NOT EXISTS idx_references_strength ON "references"(strength);
 CREATE INDEX IF NOT EXISTS idx_timeline_entity ON timeline_events(entity_id);
+CREATE INDEX IF NOT EXISTS idx_taggings_tag ON taggings(tag);
+CREATE INDEX IF NOT EXISTS idx_score_history_entity ON score_history(entity_id);
+CREATE INDEX IF NOT EXISTS idx_score_history_created ON score_history(created_at DESC);
 
 -- FTS5 sync triggers
 -- NOTE: FTS5 plain tables support DELETE statements directly
 CREATE TRIGGER IF NOT EXISTS entities_fts_insert
 AFTER INSERT ON entities BEGIN
-    INSERT INTO entities_fts(id, title, category)
-    VALUES (new.id, new.title, new.category);
+    INSERT INTO entities_fts(id, title, entity_type, category)
+    VALUES (new.id, new.title, new.entity_type, new.category);
 END;
 
 CREATE TRIGGER IF NOT EXISTS entities_fts_delete
@@ -82,6 +121,6 @@ END;
 CREATE TRIGGER IF NOT EXISTS entities_fts_update
 AFTER UPDATE ON entities BEGIN
     DELETE FROM entities_fts WHERE id = old.id;
-    INSERT INTO entities_fts(id, title, category)
-    VALUES (new.id, new.title, new.category);
+    INSERT INTO entities_fts(id, title, entity_type, category)
+    VALUES (new.id, new.title, new.entity_type, new.category);
 END;
