@@ -192,10 +192,14 @@ class Database:
         )
         # NOTE: no commit() here — caller controls transaction
 
-    async def upsert_reference(self, source_id: str, target_id: str, strength: float = 1.0) -> None:
+    async def upsert_reference(
+        self, source_id: str, target_id: str, strength: float = 1.0, bidirectional: bool = False
+    ) -> None:
         """Insert a reference (source→target) with given strength. FK check disabled intentionally:
         target may not exist yet (forward link to future note).
-        Caller manages transaction."""
+        Caller manages transaction.
+
+        If bidirectional=True, also insert reverse (target→source) at strength*0.5."""
         now = datetime.now(tz=timezone.utc).isoformat()
         await self.conn.execute("PRAGMA foreign_keys=OFF")
         try:
@@ -203,6 +207,12 @@ class Database:
                 'INSERT OR IGNORE INTO "references" (source_id, target_id, strength, created_at) VALUES (?, ?, ?, ?)',
                 (source_id, target_id, strength, now),
             )
+            if bidirectional and source_id != target_id:
+                reverse_strength = round(strength * 0.5, 2)
+                await self.conn.execute(
+                    'INSERT OR IGNORE INTO "references" (source_id, target_id, strength, created_at) VALUES (?, ?, ?, ?)',
+                    (target_id, source_id, reverse_strength, now),
+                )
         finally:
             await self.conn.execute("PRAGMA foreign_keys=ON")
         # NOTE: no commit() here — caller controls transaction

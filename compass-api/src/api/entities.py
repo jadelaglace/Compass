@@ -324,9 +324,26 @@ async def update_entity(
         await db.upsert_entity(entity_data)
         await db.upsert_score(score_data)
         # Replace outgoing refs: delete all then re-insert with computed strength
+        # Also remove orphaned reverse refs pointing to this entity as source
         await db.conn.execute('DELETE FROM "references" WHERE source_id = ?', (entity_id,))
+        # Clean up reverse refs: any ref where this entity is the target and source
+        # has no corresponding forward ref back to this entity (i.e., the source has
+        # been updated and no longer references this entity)
+        await db.conn.execute(
+            """
+            DELETE FROM "references"
+            WHERE target_id = ?
+              AND source_id IN (
+                  SELECT source_id FROM "references"
+                  WHERE target_id = ? AND source_id != ?
+                  GROUP BY source_id
+                  HAVING COUNT(*) = 1
+              )
+            """,
+            (entity_id, entity_id, entity_id),
+        )
         for target_id, strength in refs:
-            await db.upsert_reference(entity_id, target_id, strength)
+            await db.upsert_reference(entity_id, target_id, strength, bidirectional=True)
         await db.log_event(entity_id, "updated", trigger="filewatcher")
         await db.commit()
     except Exception:
