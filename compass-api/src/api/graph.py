@@ -86,7 +86,8 @@ async def get_neighbors(
             """,
             out_params,
         )
-        for row in out_cur:
+        out_rows = await out_cur.fetchall()
+        for row in out_rows:
             tid = row["target_id"]
             if tid not in visited and len(visited) < MAX_NODES:
                 visited.add(tid)
@@ -123,7 +124,8 @@ async def get_neighbors(
             """,
             in_params,
         )
-        for row in in_cur:
+        in_rows = await in_cur.fetchall()
+        for row in in_rows:
             sid = row["source_id"]
             if sid not in visited and len(visited) < MAX_NODES:
                 visited.add(sid)
@@ -195,7 +197,8 @@ async def get_path(
             """,
             (node_id, node_id),
         )
-        for row in cur:
+        rows = await cur.fetchall()
+        for row in rows:
             neighbor = row["target_id"] if row["direction"] == "outgoing" else row["source_id"]
             if neighbor == to_entity:
                 full_path = path + [neighbor]
