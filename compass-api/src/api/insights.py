@@ -116,7 +116,7 @@ async def create_insight(
     return InsightResponse(**data)
 
 
-@router.get("", response_model=InsightListResponse)
+@router.get("")
 async def list_insights(
     maturity: Annotated[Optional[str], Query(description="Filter by maturity")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 20,
@@ -132,23 +132,19 @@ async def list_insights(
     items, total = await db.list_insights(maturity=maturity, limit=limit, offset=offset)
 
     if format == "export":
-        return {
-            "format": "json",
-            "total": total,
-            "items": [
-                {
-                    "id": item["id"],
-                    "entity_id": item["entity_id"],
-                    "title": item["title"],
-                    "content": item.get("content"),
-                    "maturity": item["maturity"],
-                    "source_type": item["source_type"],
-                    "created_at": item["created_at"],
-                    "updated_at": item["updated_at"],
-                }
-                for item in items
-            ],
-        }
+        return {"format": "json", "total": total, "items": [
+            {
+                "id": item["id"],
+                "entity_id": item["entity_id"],
+                "title": item["title"],
+                "content": item.get("content"),
+                "maturity": item["maturity"],
+                "source_type": item["source_type"],
+                "created_at": item["created_at"],
+                "updated_at": item["updated_at"],
+            }
+            for item in items
+        ]}
 
     if format == "markdown":
         lines = ["# Insights Export\n\n"]
