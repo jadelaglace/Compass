@@ -333,3 +333,65 @@ async def get_entity(entity_id: str, db: Annotated[Database, Depends(get_db)] = 
         raise HTTPException(status_code=404, detail="Entity not found")
     out_refs, in_refs = await db.get_references(entity_id)
     return {**entity, "outgoing_refs": out_refs, "incoming_refs": in_refs}
+
+
+# ---- Score History endpoint (History-2) ----
+
+@router.get("/{entity_id}/score/history")
+async def get_score_history(
+    entity_id: str,
+    dimension: str = "composite",
+    days: int = 90,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """Return score history trend for an entity."""
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    # Map dimension to column
+    dim_col = {
+        "composite": "final_score",
+        "interest": "interest",
+        "strategy": "strategy",
+        "consensus": "consensus",
+    }.get(dimension, "final_score")
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    cutoff_str = cutoff.isoformat()
+
+    async with db.conn.execute(
+        f"""SELECT created_at as timestamp, {dim_col} as value
+            FROM score_history
+            WHERE entity_id = ? AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 50""",
+        (entity_id, cutoff_str),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    records = [{"timestamp": row["timestamp"], "value": float(row["value"])} for row in rows]
+
+    # Trend calculation: compare recent 3 avg vs older 3 avg
+    trend = "stable"
+    change_pct = 0.0
+    if len(records) >= 3:
+        recent = sum(r["value"] for r in records[:3]) / 3
+        older = sum(r["value"] for r in records[3:6]) / 3 if len(records) >= 6 else recent
+        if older != 0:
+            change_pct = round((recent - older) / older * 100, 1)
+            if change_pct > 5:
+                trend = "rising"
+            elif change_pct < -5:
+                trend = "declining"
+
+    values = [r["value"] for r in records]
+    return {
+        "entity_id": entity_id,
+        "dimension": dimension,
+        "records": records,
+        "trend": trend,
+        "change_pct": change_pct,
+        "min_value": min(values) if values else 0.0,
+        "max_value": max(values) if values else 0.0,
+    }
