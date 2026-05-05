@@ -2006,6 +2006,167 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 | **P3-UI-4** | 图谱可视化（Force-Directed Graph） | `feat/p3-ui-graph-viz` | P2 | P2-Graph-1 | 12h |
 | **P3-UI-5** | PWA 配置（Service Worker + 离线缓存） | `feat/p3-ui-pwa` | P2 | P3-UI-1 | 6h |
 
+#### 9.7.1 Phase 3 · 自动能力增强任务
+
+| 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 预估工时 |
+|---------|----------|------|--------|------|----------|
+| **P3-AutoTag-1** | 自动标签提取（创建时） | `feat/p3-auto-tag` | P1 | P2-Entity-1 | 4h |
+| **P3-AutoTag-2** | 标签智能推荐（已有实体） | `feat/p3-auto-tag` | P2 | P3-AutoTag-1 | 3h |
+| **P3-Maturity-1** | Entity maturity 状态机 | `feat/p3-entity-maturity` | P1 | P2-Timeline-1 | 4h |
+| **P3-Maturity-2** | 自动演化规则引擎 | `feat/p3-entity-maturity` | P2 | P3-Maturity-1 | 6h |
+| **P3-AutoRelate-1** | 实体相似度关联推荐 | `feat/p3-auto-relate` | P1 | P2-Search-1 | 6h |
+| **P3-AutoRelate-2** | 自动建立双向引用边 | `feat/p3-auto-relate` | P2 | P3-AutoRelate-1 | 4h |
+
+---
+
+#### P3-AutoTag-1：自动标签提取（创建时）
+
+**背景：** 当前创建实体时 `tags` 永远为空数组，需在创建时自动提取。
+
+**目标：** `POST /entities` 时，根据 `title` + `content`（如有）自动提取 1-5 个标签存入 `taggings` 表。
+
+**实现方案：**
+- 创建实体后，在同一事务中调用轻量 NLP 关键词提取（TitleTokenizer / 词频统计）
+- 提取逻辑：`title` 分词 + 词性过滤（保留名词/动词）→ 取 Top 3
+- 标签格式：`#标签名`（英文小写，下划线连接）
+- 如实体已有 tags（`EntityCreate.metadata.tags`），则合并去重
+
+**验收标准：**
+- [ ] `POST /entities` 创建后，`GET /entities/{id}` 的 `tags` 字段非空
+- [ ] 标签与实体内容语义相关
+- [ ] 无 title 时优雅降级（tags=[]）
+
+**API 变更：**
+- `EntityCreate.metadata.tags` 可选输入
+- `EntityListItem.tags` 必返回
+
+---
+
+#### P3-AutoTag-2：标签智能推荐（已有实体）
+
+**目标：** 新增 `POST /entities/{id}/tags/recommend` 接口，基于内容相似度推荐标签。
+
+**实现方案：**
+- 基于已有 `taggings` 表做标签共现分析
+- 同一 category 下高频共现标签 → 候选推荐
+- 同时基于 FTS 相似实体移植标签
+
+**验收标准：**
+- [ ] 推荐接口返回 1-10 个候选标签
+- [ ] 可通过 `PUT /entities/{id}/tags` 批量更新标签
+
+---
+
+#### P3-Maturity-1：Entity maturity 状态机
+
+**背景：** Schema 中 `entities.maturity` 已存在（seedling/growing/mature），但无自动演化机制。
+
+**目标：** 定义实体 maturity 状态转换规则，结合访问频率 + 评分变化触发状态升级/降级。
+
+**Maturity 状态定义：**
+
+| 状态 | 定义 | 升级条件 | 降级条件 |
+|------|------|----------|----------|
+| seedling | 新创建 / 低价值 | 累计访问≥5 且 final_score≥5 | 30天无访问 |
+| growing | 活跃中 / 中价值 | 累计访问≥15 且 final_score≥6.5 | 60天无访问 |
+| mature | 成熟 / 高价值 | 累计访问≥30 且 final_score≥7.5 | - |
+
+**实现方案：**
+- 在 `timeline_events` 表记录 `maturity_changed` 事件（已有 event_type 扩展）
+- `PATCH /entities/{id}/access` 时检查 maturity 条件，满足则更新状态
+- 新增 `GET /entities/{id}/maturity` 返回当前状态 + 升级剩余条件
+
+**验收标准：**
+- [ ] 实体按访问/评分自动升级/降级
+- [ ] `GET /entities/{id}/timeline` 可查到 maturity 变化记录
+- [ ] mature 状态实体不会被降级
+
+---
+
+#### P3-Maturity-2：自动演化规则引擎
+
+**目标：** 支持可配置的 maturity 演化规则（可插拔策略模式），支持自定义升级/降级阈值和触发条件。
+
+**实现方案：**
+- 引入 `EvolutionRule` 配置表，存储各 category 的独立演化规则
+- `PATCH /entities/{id}/access` → 调用 `MaturityEngine.evolve(entity_id)`
+- 支持策略：默认策略（内置）/ category 覆盖策略 / 手动锁定策略
+
+**验收标准：**
+- [ ] 不同 category 可设置不同演化规则
+- [ ] 可手动 `PATCH /entities/{id}/maturity` 锁定状态
+- [ ] 锁定状态下不自动演化
+
+---
+
+#### P3-AutoRelate-1：实体相似度关联推荐
+
+**目标：** 新增 `GET /entities/{id}/related` 接口，基于内容相似度 + 标签共现 + 图谱距离推荐关联实体。
+
+**推荐算法（混合）：**
+1. **内容相似度**：FTS5 检索同一 category 下的相似 title（BM25 Top 5）
+2. **标签共现**：共现次数 > 2 次的实体（同 tag 数量）
+3. **图谱距离**：2 跳以内（neighbors of neighbors）且 strength > 0.5
+
+**评分加权：** `score = 0.4 * content_sim + 0.3 * tag_overlap + 0.3 * graph_dist`
+
+**验收标准：**
+- [ ] `GET /entities/{id}/related` 返回 1-10 个推荐实体（含相似度分）
+- [ ] 过滤掉自身和已有直接引用的实体
+- [ ] 响应时间 < 200ms（单实体）
+
+---
+
+#### P3-AutoRelate-2：自动建立双向引用边
+
+**目标：** 新增 `POST /entities/{id}/relate` 接口，批量创建推荐关系并建立反向边。
+
+**实现方案：**
+- 调用 `P3-AutoRelate-1` 获取推荐实体列表
+- 对每个推荐实体创建双向引用（`source→target` 和 `target→source`）
+- 反向边 `strength = forward_strength * 0.5`（Ref-2 已有模式）
+- 触发 `PATCH /entities/{id}/access` 记录 timeline 事件
+
+**验收标准：**
+- [ ] 批量关联后，`GET /graph/neighbors/{id}` 可查到所有双向边
+- [ ] `strength` 值符合预期（正向 1.0，反向 0.5）
+- [ ] 重复关联幂等（已存在则 skip）
+
+---
+
+#### 9.7.2 Phase 3 · 自动能力增强 依赖图
+
+```
+P2-Entity-1  ←───────────→  P2-Search-1  ←──────────────┐
+       ↓                           ↓                      │
+P3-AutoTag-1  ──→  P3-AutoTag-2   │                      │
+       │                               │                      │
+       │         P2-Timeline-1  ←───────┘                      │
+       │               ↓                      │                      │
+P3-Maturity-1  ──→  P3-Maturity-2   ←── P3-AutoRelate-1  ←─┤
+       │                               │                      │
+       │                               ↓                      │
+       │                         P3-AutoRelate-2  ←───────────┘
+```
+
+#### 9.7.3 Phase 3 · 全部任务汇总
+
+| 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 预估工时 |
+|---------|----------|------|--------|------|----------|
+| **P3-UI-1** | React 前端骨架 + Vite | `feat/p3-ui-skeleton` | P1 | P2-Search-1 | 8h |
+| **P3-UI-2** | 实体详情页（阅读视图） | `feat/p3-ui-entity-detail` | P1 | P3-UI-1 | 6h |
+| **P3-UI-3** | 评分面板 | `feat/p3-ui-score-panel` | P1 | P2-Search-1 | 4h |
+| **P3-UI-4** | 图谱可视化 | `feat/p3-ui-graph-viz` | P2 | P2-Graph-1 | 12h |
+| **P3-UI-5** | PWA 配置 | `feat/p3-ui-pwa` | P2 | P3-UI-1 | 6h |
+| **P3-AutoTag-1** | 自动标签提取（创建时） | `feat/p3-auto-tag` | P1 | P2-Entity-1 | 4h |
+| **P3-AutoTag-2** | 标签智能推荐 | `feat/p3-auto-tag` | P2 | P3-AutoTag-1 | 3h |
+| **P3-Maturity-1** | Entity maturity 状态机 | `feat/p3-entity-maturity` | P1 | P2-Timeline-1 | 4h |
+| **P3-Maturity-2** | 自动演化规则引擎 | `feat/p3-entity-maturity` | P2 | P3-Maturity-1 | 6h |
+| **P3-AutoRelate-1** | 实体相似度关联推荐 | `feat/p3-auto-relate` | P1 | P2-Search-1 | 6h |
+| **P3-AutoRelate-2** | 自动建立双向引用边 | `feat/p3-auto-relate` | P2 | P3-AutoRelate-1 | 4h |
+
+**Phase 3 总工时：67h**
+
 ---
 
 #### P3-UI-1：React 前端骨架

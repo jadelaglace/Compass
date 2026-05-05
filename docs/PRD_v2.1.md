@@ -1381,10 +1381,57 @@ networks:
 | P3-PWA-3 | 离线队列（评分/引用） | `feat/p3-pwa-3` | P2 | P3-PWA-2 | 4h |
 | P3-MCP-1 | MCP Server 基础（3 Tool） | `feat/p3-mcp-1-basic` | P2 | P2-Search-1 | 6h |
 | P3-MCP-2 | MCP Server 扩展至 15 Tool | `feat/p3-mcp-2-full` | P2 | P3-MCP-1 | 8h |
+| **P3-AutoTag-1** | 自动标签提取（创建时） | `feat/p3-auto-tag` | P1 | P2-Entity-1 | 4h |
+| **P3-AutoTag-2** | 标签智能推荐 | `feat/p3-auto-tag` | P2 | P3-AutoTag-1 | 3h |
+| **P3-Maturity-1** | Entity maturity 状态机 | `feat/p3-entity-maturity` | P1 | P2-Timeline-1 | 4h |
+| **P3-Maturity-2** | 自动演化规则引擎 | `feat/p3-entity-maturity` | P2 | P3-Maturity-1 | 6h |
+| **P3-AutoRelate-1** | 实体相似度关联推荐 | `feat/p3-auto-relate` | P1 | P2-Search-1 | 6h |
+| **P3-AutoRelate-2** | 自动建立双向引用边 | `feat/p3-auto-relate` | P2 | P3-AutoRelate-1 | 4h |
 
-**Phase 3 总工时：94h（4-6 周）**
+**Phase 3 总工时：94h → 121h（4-6 周）**
 
-### 14.4 Phase 4：部署与工程化
+### 14.4 Phase 3 · 自动能力增强（新增）
+
+> **背景：** 当前 Schema 已支持 tags/maturity/references，但无自动填充/演化机制。Phase 3 补全这条"自动闭环"。
+
+#### 14.4.1 P3-AutoTag：自动标签
+
+**目标：** 创建实体时自动从 title/content 提取标签，无需手动指定。
+
+| 任务 | 描述 | 依赖 |
+|------|------|------|
+| P3-AutoTag-1 | 创建实体时自动提取标签（TitleTokenizer，Top 3） | P2-Entity-1 |
+| P3-AutoTag-2 | 基于共现分析的标签智能推荐接口 | P3-AutoTag-1 |
+
+**标签提取规则：**
+- `title` 分词 → 词性过滤（保留名词/动词）→ 取 Top 3
+- 格式：`#标签名`（英文小写，下划线连接）
+- 与手动传入的 `metadata.tags` 合并去重
+
+#### 14.4.2 P3-Maturity：实体成熟度自动演化
+
+**目标：** 实体 maturity 根据访问频率 + 评分自动升级/降级，形成知识生命周期管理。
+
+| 状态 | 升级条件 | 降级条件 |
+|------|----------|----------|
+| seedling | 累计访问≥5 且 final_score≥5 | 30天无访问 |
+| growing | 累计访问≥15 且 final_score≥6.5 | 60天无访问 |
+| mature | 累计访问≥30 且 final_score≥7.5 | -（锁定） |
+
+**触发时机：** `PATCH /entities/{id}/access` 时检查条件，满足则更新状态并记录 `timeline_events`。
+
+#### 14.4.3 P3-AutoRelate：自动关联推荐
+
+**目标：** 基于内容相似度 + 标签共现 + 图谱距离，自动推荐关联实体并支持一键建联。
+
+**推荐算法（混合）：**
+- 内容相似度（FTS5 BM25）权重 0.4
+- 标签共现（>2次）权重 0.3
+- 图谱距离（2跳内，strength>0.5）权重 0.3
+
+**关联操作：** `POST /entities/{id}/relate` 批量建立双向引用边（反向 strength×0.5）。
+
+### 14.5 Phase 4：部署与工程化
 
 | 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 工时 |
 |---------|----------|------|--------|------|------|
