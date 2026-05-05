@@ -306,7 +306,7 @@ class TestInsightExport:
 
     def test_export_all_via_query_param_json(self, client: TestClient):
         """Export all insights via ?format=export query param (GET /insights with format=export)."""
-        resp = client.get("/insights/export")
+        resp = client.get("/insights?format=export")
         assert resp.status_code == 200
         data = resp.json()
         assert data["format"] == "json"
@@ -314,7 +314,7 @@ class TestInsightExport:
         assert "total" in data
 
     def test_export_all_via_query_param_markdown(self, client: TestClient):
-        resp = client.get("/insights/export?format=markdown")
+        resp = client.get("/insights?format=markdown")
         assert resp.status_code == 200
         data = resp.json()
         assert data["format"] == "markdown"
@@ -322,7 +322,7 @@ class TestInsightExport:
         assert "# Insights Export" in data["content"]
 
     def test_export_with_maturity_filter(self, client: TestClient):
-        resp = client.get("/insights/export?format=json&maturity=seedling")
+        resp = client.get("/insights?format=export&maturity=seedling")
         assert resp.status_code == 200
         data = resp.json()
         assert data["format"] == "json"
@@ -393,7 +393,7 @@ class TestInsightExport:
         assert data["entity_id"] == "test-export-entity-1"
 
     def test_export_invalid_format(self, client: TestClient):
-        resp = client.get("/insights/export?format=yaml")
+        resp = client.get("/insights?format=yaml")
         assert resp.status_code == 422
 
     def test_export_entity_not_found(self, client: TestClient):
