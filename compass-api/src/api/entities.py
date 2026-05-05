@@ -656,3 +656,59 @@ async def get_entities_timeline(
     ]
     has_more = (offset + limit) < total
     return TimelineResponse(items=items, total=total, has_more=has_more)
+
+
+# ---- Per-entity timeline: GET /entities/{entity_id}/timeline ----
+
+class EntityTimelineItem(BaseModel):
+    event_type: str
+    event_trigger: Optional[str]
+    created_at: str
+    metadata: Optional[dict] = None
+
+
+class EntityTimelineResponse(BaseModel):
+    entity_id: str
+    items: list[EntityTimelineItem]
+    total: int
+
+
+@router.get("/{entity_id}/timeline", response_model=EntityTimelineResponse)
+async def get_entity_timeline(
+    entity_id: str,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> EntityTimelineResponse:
+    """Return all timeline events for a specific entity."""
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    # Count total events for this entity
+    count_sql = "SELECT COUNT(*) FROM timeline_events WHERE entity_id = ?"
+    async with db.conn.execute(count_sql, (entity_id,)) as cur:
+        total = (await cur.fetchone())[0]
+
+    # Fetch paginated events
+    sql = """
+        SELECT event_type, trigger, created_at, metadata
+        FROM timeline_events
+        WHERE entity_id = ?
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+    """
+    async with db.conn.execute(sql, (entity_id, limit, offset)) as cur:
+        rows = await cur.fetchall()
+
+    import json as _json
+    items = [
+        EntityTimelineItem(
+            event_type=row["event_type"],
+            event_trigger=row["trigger"],
+            created_at=row["created_at"],
+            metadata=_json.loads(row["metadata"]) if row["metadata"] else None,
+        )
+        for row in rows
+    ]
+    return EntityTimelineResponse(entity_id=entity_id, items=items, total=total)
