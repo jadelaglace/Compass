@@ -483,6 +483,11 @@ async def record_access(
     now_str = now.isoformat()
     last_boosted_str = entity.get("last_boosted_at")
 
+    # access_count lives in metadata JSON, not as a direct entity column
+    import json
+    meta = json.loads(entity.get("metadata") or "{}")
+    current_access_count = meta.get("access_count", 0)
+
     # Debounce: skip count bump if last access within 5 minutes
     if last_boosted_str:
         try:
@@ -491,7 +496,7 @@ async def record_access(
             if (now - last_boosted).total_seconds() < ACCESS_DEBOUNCE_SECONDS:
                 return AccessResponse(
                     entity_id=entity_id,
-                    access_count=entity.get("access_count", 0) or 0,
+                    access_count=current_access_count,
                     accessed_at=last_boosted.isoformat(),
                     decay_updated=False,
                 )
@@ -515,9 +520,8 @@ async def record_access(
     new_final = round(result.final_score, 2)
 
     # Update metadata access_count
-    import json
-    meta = json.loads(entity.get("metadata") or "{}")
-    new_count = (meta.get("access_count") or 0) + 1
+    new_count = current_access_count + 1
+    meta["access_count"] = new_count
     meta["access_count"] = new_count
 
     await db.begin()
