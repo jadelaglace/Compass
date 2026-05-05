@@ -271,6 +271,70 @@ class Database:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def list_entities(
+        self,
+        entity_type: Optional[str] = None,
+        min_score: float = 0.0,
+        tags: Optional[list[str]] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return paginated list of entities with optional filters.
+
+        Returns (items, total_count).
+        """
+        conditions = ["s.final_score >= ?", "e.status = 'active'"]
+        params: list[Any] = [min_score]
+
+        if entity_type:
+            conditions.append("e.entity_type = ?")
+            params.append(entity_type)
+
+        # Tag filtering via subquery on taggings table (AND logic)
+        if tags:
+            for tag in tags:
+                conditions.append(
+                    "e.id IN (SELECT entity_id FROM taggings WHERE tag = ?)"
+                )
+                params.append(tag)
+
+        where_clause = " AND ".join(conditions)
+
+        # Total count (without limit/offset)
+        count_sql = f"""
+            SELECT COUNT(DISTINCT e.id)
+            FROM entities e
+            JOIN scores s ON e.id = s.entity_id
+            WHERE {where_clause}
+        """
+        async with self.conn.execute(count_sql, params) as cur:
+            total = (await cur.fetchone())[0]
+
+        # Paginated items
+        sql = f"""
+            SELECT DISTINCT e.id, e.title, e.entity_type, e.category,
+                   e.vault_path, s.final_score, e.created_at, e.updated_at
+            FROM entities e
+            JOIN scores s ON e.id = s.entity_id
+            WHERE {where_clause}
+            ORDER BY s.final_score DESC, e.updated_at DESC
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        async with self.conn.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+
+        items = [dict(row) for row in rows]
+
+        # Attach tags per entity
+        for item in items:
+            async with self.conn.execute(
+                "SELECT tag FROM taggings WHERE entity_id = ?", (item["id"],)
+            ) as cur:
+                item["tags"] = [row[0] for row in await cur.fetchall()]
+
+        return items, total
+
     async def search_entities(
         self, query: str, limit: int = 20
     ) -> list[dict[str, Any]]:
