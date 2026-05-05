@@ -1,4 +1,5 @@
 """REST endpoints for entity management."""
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
@@ -9,9 +10,55 @@ from src import config
 from src.db.database import Database, get_db
 from src.core.rust_client import rust_client
 
-# ---- entity ID normalization (mirrors FileWatcher's vault_path_to_entity_id) ----
+# Reference strength patterns — computed from link text / context
+# Ordered: first match wins
+_REF_STRENGTH_PATTERNS = [
+    (re.compile(r"(?:see|referenced?|linked|cited)\s+:?\s*\[\[([^\]]+)\]\]", re.IGNORECASE), 0.9),
+    (re.compile(r"\[\[([^\]]+)\]\](?:\s*\([^)]+\))?"), 1.0),
+]
 
-import re
+
+def _extract_refs_with_strength(content: str) -> list[tuple[str, float]]:
+    """Extract (entity_id, strength) from all [[wikilinks]] in content.
+
+    Strengths:
+    - Explicit citation language: see [[ref]], refer [[ref]] → 0.9
+    - Standard [[link]] → 1.0
+    """
+    wikilink_pattern = re.compile(r"\[\[([^\]]+)\]\]")
+    citation_pattern = re.compile(
+        r"(?:see|referenced?|linked|cited)\s+:?\s*\[\[([^\]]+)\]\]",
+        re.IGNORECASE,
+    )
+    # Find all citation-style first
+    citation_ids = {
+        m.group(1) for m in citation_pattern.finditer(content)
+    }
+    results: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for m in wikilink_pattern.finditer(content):
+        entity_id = normalize_entity_id(m.group(1))
+        if entity_id in seen:
+            continue
+        seen.add(entity_id)
+        strength = 0.9 if m.group(0) in citation_ids or entity_id in citation_ids else 1.0
+        results.append((entity_id, strength))
+    return results
+
+
+def _calc_ref_strength(link_text: str) -> float:
+    """Infer reference strength from wikilink context.
+
+    Strengths:
+    - Explicit citation language (see [[ref]]) → 0.9
+    - Standard [[link]] → 1.0
+    """
+    for pattern, strength in _REF_STRENGTH_PATTERNS:
+        if pattern.search(link_text):
+            return strength
+    return 1.0
+
+# ---- entity ID normalization (mirrors FileWatcher's vault_path_to_entity_id) ----
 
 _STRIP_EXT_RE = re.compile(r"\.(md|MD|markdown|MARKDOWN)$")
 _MULTI_DASH_RE = re.compile(r"-+")
@@ -43,23 +90,19 @@ async def _compute_score_and_refs(
     consensus: float,
     content: Optional[str],
     entity_id: str,
-) -> tuple[dict, list[str]]:
+) -> tuple[dict, list[tuple[str, float]]]:
     """Compute score via Rust and extract refs if content is provided.
 
-    Returns (score_data, ref_ids).
+    Returns (score_data, ref_entries) where ref_entries is list of (target_id, strength).
     """
     now = datetime.now(tz=timezone.utc).isoformat()
-    refs: list[str] = []
+    ref_entries: list[tuple[str, float]] = []
     if content:
-        refs_result = await rust_client.parse_refs(content, current_id=entity_id)
-        raw_refs = refs_result.refs
-        # Normalize refs so self-reference filtering works correctly:
-        # Rust extracts e.g. "Projects/compass-v2"; entity_id is "projects-compass-v2"
+        # Extract refs with per-link strength inference
+        ref_entries = _extract_refs_with_strength(content)
         normalized_entity_id = normalize_entity_id(entity_id)
-        refs = [
-            r for r in (normalize_entity_id(r) for r in raw_refs)
-            if r != normalized_entity_id
-        ]
+        # Filter out self-references
+        ref_entries = [(tid, s) for tid, s in ref_entries if tid != normalized_entity_id]
 
     score_result = await rust_client.compute_score(
         interest=interest,
@@ -76,7 +119,7 @@ async def _compute_score_and_refs(
         "updated_at": now,
         "last_boosted_at": now,  # used by decay formula — must be kept current
     }
-    return score_data, refs
+    return score_data, ref_entries
 
 
 class EntityCreate(BaseModel):
@@ -155,7 +198,7 @@ async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(ge
     await db.create_entity_full(
         entity_data=entity_data,
         score_data=score_data,
-        ref_ids=refs,
+        ref_entries=refs,
         event_type="created",
         event_trigger="api",
     )
@@ -280,10 +323,10 @@ async def update_entity(
     try:
         await db.upsert_entity(entity_data)
         await db.upsert_score(score_data)
-        # Replace outgoing refs: delete all then re-insert
+        # Replace outgoing refs: delete all then re-insert with computed strength
         await db.conn.execute('DELETE FROM "references" WHERE source_id = ?', (entity_id,))
-        for ref_id in refs:
-            await db.upsert_reference(entity_id, ref_id)
+        for target_id, strength in refs:
+            await db.upsert_reference(entity_id, target_id, strength)
         await db.log_event(entity_id, "updated", trigger="filewatcher")
         await db.commit()
     except Exception:

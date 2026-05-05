@@ -48,7 +48,7 @@ async def test_create_and_get_entity(tmp_path):
             "last_boosted_at": now,
         }
         await database.create_entity_full(
-            entity_data, score_data, ref_ids=[], event_type="created", event_trigger="test"
+            entity_data, score_data, ref_entries=[], event_type="created", event_trigger="test"
         )
 
         entity = await database.get_entity("test-entity-1")
@@ -91,7 +91,7 @@ async def test_upsert_score_after_entity(tmp_path):
             "last_boosted_at": now,
         }
         await database.create_entity_full(
-            entity_data, score_data_initial, ref_ids=[], event_type="created", event_trigger="test"
+            entity_data, score_data_initial, ref_entries=[], event_type="created", event_trigger="test"
         )
         # Update the score
         score_data_updated = dict(score_data_initial)
@@ -187,7 +187,7 @@ async def test_log_event(tmp_path):
             "last_boosted_at": now,
         }
         await database.create_entity_full(
-            entity_data, score_data, ref_ids=[], event_type="created", event_trigger="test"
+            entity_data, score_data, ref_entries=[], event_type="created", event_trigger="test"
         )
         await database.log_event("event-test", "reviewed", trigger="test")
 
