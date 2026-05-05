@@ -222,3 +222,99 @@ class TestInsightMaturityUpgrade:
         """Patching nonexistent insight returns 404."""
         resp = client.patch("/insights/nonexistent-id/maturity")
         assert resp.status_code == 404
+
+
+class TestInsightEvolution:
+    """Tests for Insight-2 evolve endpoint."""
+
+    _counter = 0
+
+    @classmethod
+    def _vault(cls):
+        cls._counter += 1
+        return f"/tmp/insight_evolve_vault_{cls._counter}"
+
+    def test_evolve_requires_mature_insight(self, client: TestClient):
+        """Non-mature insight returns evolved=False."""
+        vp = self._vault()
+        client.post("/entities", json={
+            "id": "test-evolve-1",
+            "title": "Evolve Test Entity",
+            "entity_type": "knowledge",
+            "vault_path": vp,
+        })
+        create_resp = client.post("/insights", json={
+            "entity_id": "test-evolve-1",
+            "title": "Seedling Insight",
+        })
+        insight_id = create_resp.json()["id"]
+
+        resp = client.get(f"/insights/{insight_id}/evolve")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["evolved"] is False
+        assert data["detail"] == "Insight not yet mature"
+
+    def test_evolve_entity_from_seedling_insight(self, client: TestClient):
+        """Mature insight evolves entity from seedling to sprout."""
+        vp = self._vault()
+        client.post("/entities", json={
+            "id": "test-evolve-2",
+            "title": "Evolve Test Entity 2",
+            "entity_type": "knowledge",
+            "vault_path": vp,
+        })
+        create_resp = client.post("/insights", json={
+            "entity_id": "test-evolve-2",
+            "title": "Evolve Insight 2",
+        })
+        insight_id = create_resp.json()["id"]
+
+        # Advance insight to sprout then mature
+        client.patch(f"/insights/{insight_id}/maturity")  # seedling → sprout
+        client.patch(f"/insights/{insight_id}/maturity")  # sprout → mature
+
+        resp = client.get(f"/insights/{insight_id}/evolve")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["evolved"] is True
+        assert data["entity_maturity"] == "sprout"
+
+    def test_evolve_already_mature_entity(self, client: TestClient):
+        """Evolve returns evolved=False when entity is already mature."""
+        vp = self._vault()
+        client.post("/entities", json={
+            "id": "test-evolve-3",
+            "title": "Already Mature Entity",
+            "entity_type": "knowledge",
+            "vault_path": vp,
+        })
+        create_resp = client.post("/insights", json={
+            "entity_id": "test-evolve-3",
+            "title": "Evolve Insight 3",
+        })
+        insight_id = create_resp.json()["id"]
+
+        # Advance insight to mature
+        client.patch(f"/insights/{insight_id}/maturity")
+        client.patch(f"/insights/{insight_id}/maturity")
+
+        # First evolve: seedling→sprout
+        resp1 = client.get(f"/insights/{insight_id}/evolve")
+        assert resp1.json()["evolved"] is True
+        assert resp1.json()["entity_maturity"] == "sprout"
+
+        # Second evolve: sprout→mature
+        resp2 = client.get(f"/insights/{insight_id}/evolve")
+        assert resp2.json()["evolved"] is True
+        assert resp2.json()["entity_maturity"] == "mature"
+
+        # Third evolve: already mature → no change
+        resp3 = client.get(f"/insights/{insight_id}/evolve")
+        assert resp3.json()["evolved"] is False
+        assert "already" in resp3.json()["detail"].lower()
+
+    def test_evolve_insight_not_found(self, client: TestClient):
+        """Evolve returns 404 for nonexistent insight."""
+        resp = client.get("/insights/nonexistent-id/evolve")
+        assert resp.status_code == 404

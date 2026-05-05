@@ -1,4 +1,5 @@
 """REST endpoints for Insight management."""
+import json
 from datetime import datetime, timezone
 from typing import Annotated, Optional
 
@@ -62,8 +63,21 @@ VALID_MATURITY_TRANSITIONS = {
 }
 
 
+VALID_ENTITY_MATURITY_TRANSITIONS = {
+    "seedling": ["sprout"],
+    "sprout": ["mature"],
+    "mature": [],
+}
+
+
+def _next_entity_maturity(current: str) -> Optional[str]:
+    """Return the next entity maturity level, or None if fully mature."""
+    transitions = VALID_ENTITY_MATURITY_TRANSITIONS.get(current, [])
+    return transitions[0] if transitions else None
+
+
 def _next_maturity(current: str) -> Optional[str]:
-    """Return the next maturity level, or None if fully mature."""
+    """Return the next insight maturity level, or None if fully mature."""
     transitions = VALID_MATURITY_TRANSITIONS.get(current, [])
     return transitions[0] if transitions else None
 
@@ -180,3 +194,95 @@ async def upgrade_maturity(
         raise
 
     return InsightResponse(**updated)
+
+
+# ---- Insight-2: GET /entities/{id}/insights/{insight_id}/evolve ----
+#    Trigger evolution of entity maturity based on insight maturity.
+#    Entity transitions: seedling → sprout → mature
+#    Triggered when an insight reaches "mature" state.
+#    Logs entity maturity_upgraded event with from/to metadata.
+#    NOTE: This is an internal trigger called by the system when insight matures.
+#    It's exposed as a fast endpoint for the Agent to call after insight maturity.
+#    The background decay/evolution logic is handled separately in the agent loop.
+
+
+class EvolveResponse(BaseModel):
+    entity_id: str
+    entity_maturity: str
+    insight_maturity: str
+    evolved: bool
+    detail: str
+
+
+@router.get("/{insight_id}/evolve", response_model=EvolveResponse)
+async def evolve_entity_from_insight(
+    insight_id: str,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> EvolveResponse:
+    """Trigger entity evolution when insight reaches mature.
+
+    Called by the Agent after an insight reaches 'mature' maturity.
+    Checks if the host entity can transition (seedling→sprout or sprout→mature).
+    Logs entity 'maturity_upgraded' event.
+    """
+    insight = await db.get_insight(insight_id)
+    if not insight:
+        raise HTTPException(status_code=404, detail="Insight not found")
+
+    if insight["maturity"] != "mature":
+        return EvolveResponse(
+            entity_id=insight["entity_id"],
+            entity_maturity="",
+            insight_maturity=insight["maturity"],
+            evolved=False,
+            detail="Insight not yet mature",
+        )
+
+    entity = await db.get_entity(insight["entity_id"])
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    current = entity.get("maturity", "seedling")
+    next_m = _next_entity_maturity(current)
+
+    if next_m is None:
+        return EvolveResponse(
+            entity_id=insight["entity_id"],
+            entity_maturity=current,
+            insight_maturity="mature",
+            evolved=False,
+            detail="Entity already fully mature",
+        )
+
+    now = datetime.now(tz=timezone.utc).isoformat()
+    history_entry = json.dumps({
+        "from": current,
+        "to": next_m,
+        "reason": f"insight_matured:{insight_id}",
+        "at": now,
+    })
+
+    await db.begin()
+    try:
+        await db.conn.execute(
+            "UPDATE entities SET maturity = ?, maturity_history = ? WHERE id = ?",
+            (next_m, history_entry, insight["entity_id"]),
+        )
+        await db.log_event(
+            insight["entity_id"],
+            "maturity_upgraded",
+            trigger="insight_evolve",
+            extra={"from": current, "to": next_m, "insight_id": insight_id},
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    return EvolveResponse(
+        entity_id=insight["entity_id"],
+        entity_maturity=next_m,
+        insight_maturity="mature",
+        evolved=True,
+        detail=f"Entity evolved from {current} to {next_m}",
+    )
