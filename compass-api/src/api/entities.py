@@ -1,5 +1,6 @@
 """REST endpoints for entity management."""
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
@@ -9,6 +10,73 @@ from pydantic import BaseModel, Field
 from src import config
 from src.db.database import Database, get_db
 from src.core.rust_client import rust_client
+
+# ---- Auto-tag extraction ----
+
+# Bilingual stopwords: English + Chinese common words
+_STOPWORDS: frozenset[str] = frozenset({
+    # English
+    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might",
+    "must", "shall", "can", "need", "this", "that", "these", "those",
+    "it", "its", "with", "from", "by", "as", "into", "through", "during",
+    "before", "after", "above", "below", "between", "under", "again",
+    "further", "then", "once", "here", "there", "when", "where", "why",
+    "how", "all", "each", "few", "more", "most", "other", "some", "such",
+    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+    # Chinese
+    "的", "是", "在", "了", "和", "与", "或", "以及", "之", "于", "为",
+    "以", "因", "从", "到", "由", "对", "而", "则", "但", "却", "所以",
+    "因为", "如果", "虽然", "然而", "不过", "只是", "就是", "而且", "或者",
+    "这", "那", "这里", "那里", "这个", "那个", "自己", "什么", "怎么",
+    "如何", "何时", "何地", "为何", "多少", "几个", "一个", "一些",
+    # Symbols to discard
+    "_", "-", "/", "\\", ":", ".", ",", ";", "!", "?", "'", "\"",
+    "（", "）", "（", "）", "【", "】", "[", "]", "{", "}",
+})
+
+
+def _extract_tags(title: str) -> list[str]:
+    """Extract 1-5 tags from an entity title.
+
+    Algorithm:
+    1. Tokenise on camelCase, underscores, spaces, dashes, dots
+    2. Filter stopwords (EN/ZH/symbols), single-char tokens, pure numbers
+    3. Count word frequency (case-insensitive)
+    4. Return Top 3 as `#lowercase_underscore` tags
+
+    Returns empty list if no useful tags found.
+    """
+    # Tokenise
+    tokens: list[str] = []
+    # Split on: space, underscore, dash, dot, camelCase boundary, Chinese chars
+    raw_tokens = re.split(r'[\s_\-\./\\]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', title)
+    for raw in raw_tokens:
+        # Strip Chinese punctuation
+        raw = re.sub(r'[\u2000-\u206f\u3000-\u303f\uff00-\uffef，。！？；：、""''（）【】《》]', '', raw)
+        if raw:
+            tokens.append(raw.strip())
+
+    # Lowercase + filter
+    filtered: list[str] = []
+    for tok in tokens:
+        tok_lower = tok.lower()
+        if (
+            len(tok_lower) < 2
+            or tok_lower in _STOPWORDS
+            or tok_lower.isdigit()
+            or re.fullmatch(r'[0-9]+', tok_lower)
+        ):
+            continue
+        filtered.append(tok_lower)
+
+    if not filtered:
+        return []
+
+    # Top-3 by frequency
+    top = Counter(filtered).most_common(3)
+    return [f"#{word}" for word, _ in top]
 
 # Reference strength patterns — computed from link text / context
 # Ordered: first match wins
@@ -145,6 +213,7 @@ class EntityResponse(BaseModel):
     category: str
     vault_path: str
     final_score: float
+    tags: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
 
@@ -173,7 +242,7 @@ class EntityListResponse(BaseModel):
 
 @router.post("", response_model=EntityResponse)
 async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(get_db)] = None) -> EntityResponse:
-    """Create a new entity with computed score and extracted refs."""
+    """Create a new entity with computed score, extracted refs, and auto-tags."""
     now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = entity.vault_path
     file_path = entity.file_path or str(config.VAULT_PATH / vault_path)
@@ -203,12 +272,25 @@ async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(ge
         event_trigger="api",
     )
 
+    # Auto-tag extraction: derive up to 3 tags from title
+    tags = _extract_tags(entity.title)
+    if tags:
+        await db.begin()
+        try:
+            for tag in tags:
+                await db.upsert_tagging(entity.id, tag)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
     return EntityResponse(
         id=entity.id,
         title=entity.title,
         category=entity.category,
         vault_path=vault_path,
         final_score=score_data["final_score"],
+        tags=tags,
         created_at=now,
         updated_at=now,
     )
@@ -499,12 +581,16 @@ async def delete_entity(entity_id: str, db: Annotated[Database, Depends(get_db)]
 
 @router.get("/{entity_id}")
 async def get_entity(entity_id: str, db: Annotated[Database, Depends(get_db)] = None) -> dict:
-    """Fetch a single entity by ID with its incoming and outgoing references."""
+    """Fetch a single entity by ID with its incoming and outgoing references and tags."""
     entity = await db.get_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     out_refs, in_refs = await db.get_references(entity_id)
-    return {**entity, "outgoing_refs": out_refs, "incoming_refs": in_refs}
+    async with db.conn.execute(
+        "SELECT tag FROM taggings WHERE entity_id = ?", (entity_id,)
+    ) as cur:
+        tags = [row[0] for row in await cur.fetchall()]
+    return {**entity, "outgoing_refs": out_refs, "incoming_refs": in_refs, "tags": tags}
 
 
 # ---- Score History endpoint (History-2) ----

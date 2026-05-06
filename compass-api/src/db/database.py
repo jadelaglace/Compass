@@ -225,6 +225,13 @@ class Database:
             row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def upsert_tagging(self, entity_id: str, tag: str) -> None:
+        """Insert a tagging association. Does nothing if already exists (UNIQUE constraint)."""
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO taggings (entity_id, tag) VALUES (?, ?)",
+            (entity_id, tag),
+        )
+
     async def upsert_insight(self, data: dict[str, Any]) -> None:
         """Insert or update an insight. Caller manages transaction."""
         await self.conn.execute(
