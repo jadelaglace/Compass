@@ -520,6 +520,108 @@ class Database:
             [r["source_id"] for r in in_rows],
         )
 
+    async def get_related_entities(self, entity_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Hybrid related-entity recommendation for an entity.
+
+        Combines:
+        - Content similarity (FTS5, same category): weight 0.4
+        - Tag co-occurrence (shared tags > 2): weight 0.3
+        - Graph proximity (2 hops, strength > 0.5): weight 0.3
+        """
+        entity = await self.get_entity(entity_id)
+        if not entity:
+            return []
+
+        scores: dict[str, float] = {}
+
+        # 1. Content similarity via FTS5 (same category, top 5)
+        async with self.conn.execute(
+            """
+            SELECT e.id, e.title, e.category, s.final_score
+            FROM entities_fts f
+            JOIN entities e ON e.id = f.id
+            LEFT JOIN scores s ON s.entity_id = e.id
+            WHERE entities_fts MATCH ? AND e.category = ? AND e.id != ?
+            ORDER BY rank
+            LIMIT 5
+            """,
+            (entity["title"], entity["category"], entity_id),
+        ) as cur:
+            for row in await cur.fetchall():
+                rid = row["id"]
+                scores[rid] = scores.get(rid, 0) + 0.4
+
+        # 2. Tag co-occurrence (shared tags > 2)
+        async with self.conn.execute(
+            """
+            SELECT t1.entity_id AS other_id, COUNT(*) AS shared_tags
+            FROM taggings t1
+            JOIN taggings t2 ON t1.tag = t2.tag AND t2.entity_id = ?
+            WHERE t1.entity_id != ?
+            GROUP BY t1.entity_id
+            HAVING shared_tags > 2
+            LIMIT 10
+            """,
+            (entity_id, entity_id),
+        ) as cur:
+            for row in await cur.fetchall():
+                rid = row["other_id"]
+                # Normalize: tag count 3→0.3, 4→0.4, etc. capped at 1.0
+                tag_score = min(row["shared_tags"] * 0.1, 1.0)
+                scores[rid] = scores.get(rid, 0) + 0.3 * tag_score
+
+        # 3. Graph proximity (2 hops, strength > 0.5)
+        async with self.conn.execute(
+            """
+            WITH one_hop AS (
+                SELECT target_id FROM "references" WHERE source_id = ? AND strength > 0.5
+            ),
+            two_hop AS (
+                SELECT r.target_id
+                FROM "references" r
+                JOIN one_hop h ON r.source_id = h.target_id
+                WHERE r.target_id != ? AND r.strength > 0.5
+            )
+            SELECT DISTINCT target_id FROM two_hop LIMIT 10
+            """,
+            (entity_id, entity_id),
+        ) as cur:
+            for row in await cur.fetchall():
+                rid = row["target_id"]
+                scores[rid] = scores.get(rid, 0) + 0.3
+
+        if not scores:
+            return []
+
+        # Sort by combined score, fetch entity details
+        sorted_ids = sorted(scores, key=lambda x: scores[x], reverse=True)[:limit]
+        placeholders = ",".join("?" * len(sorted_ids))
+        async with self.conn.execute(
+            f"""
+            SELECT e.id, e.title, e.entity_type, e.category, e.vault_path,
+                   s.final_score, e.created_at, e.updated_at
+            FROM entities e
+            LEFT JOIN scores s ON s.entity_id = e.id
+            WHERE e.id IN ({placeholders})
+            """,
+            sorted_ids,
+        ) as cur:
+            rows = await cur.fetchall()
+
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["related_score"] = round(scores.get(item["id"], 0), 3)
+            # Attach tags
+            async with self.conn.execute(
+                "SELECT tag FROM taggings WHERE entity_id = ?", (item["id"],)
+            ) as tag_cur:
+                item["tags"] = [r[0] for r in await tag_cur.fetchall()]
+            items.append(item)
+
+        items.sort(key=lambda x: x["related_score"], reverse=True)
+        return items
+
 
 # ---- FastAPI dependency ----
 
