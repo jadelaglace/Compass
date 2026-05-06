@@ -922,3 +922,64 @@ async def get_related_entities(
         items=[RelatedEntityItem(**item) for item in items],
         count=len(items),
     )
+
+
+# ---- P3-AutoTag-2: tag recommendation + batch tag update ----
+
+class TagRecommendationItem(BaseModel):
+    tag: str
+    score: int
+
+
+class TagRecommendResponse(BaseModel):
+    entity_id: str
+    recommendations: list[TagRecommendationItem]
+    count: int
+
+
+class TagUpdateRequest(BaseModel):
+    tags: list[str] = Field(description="Complete list of tags to set (replaces existing)")
+
+
+@router.post("/{entity_id}/tags/recommend")
+async def recommend_tags(
+    entity_id: str,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> TagRecommendResponse:
+    """Recommend candidate tags for an entity based on co-occurrence analysis and FTS similarity.
+
+    Algorithm:
+    1. Co-occurrence: find entities sharing >2 tags, collect their other tags (Top 10 by frequency)
+    2. FTS fallback: same-category entities with similar titles, borrow their tags as candidates
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    recs = await db.get_tag_recommendations(entity_id, limit=limit)
+    return TagRecommendResponse(
+        entity_id=entity_id,
+        recommendations=[TagRecommendationItem(**r) for r in recs],
+        count=len(recs),
+    )
+
+
+@router.put("/{entity_id}/tags")
+async def update_tags(
+    entity_id: str,
+    update: TagUpdateRequest,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """Replace all tags for an entity with the provided list."""
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    await db.begin()
+    try:
+        await db.set_entity_tags(entity_id, update.tags)
+        await db.log_event(entity_id, "tags_updated", trigger="api", extra={"tags": update.tags})
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"entity_id": entity_id, "tags": update.tags}
