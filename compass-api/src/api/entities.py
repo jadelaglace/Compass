@@ -713,3 +713,48 @@ async def get_entity_timeline(
         for row in rows
     ]
     return EntityTimelineResponse(entity_id=entity_id, items=items, total=total)
+
+
+# ---- P3-AutoRelate-1: GET /entities/{id}/related ----
+
+class RelatedEntityItem(BaseModel):
+    id: str
+    title: str
+    entity_type: str
+    category: str
+    vault_path: str
+    final_score: Optional[float]
+    related_score: float
+    tags: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class RelatedResponse(BaseModel):
+    entity_id: str
+    items: list[RelatedEntityItem]
+    count: int
+
+
+@router.get("/{entity_id}/related")
+async def get_related_entities(
+    entity_id: str,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> RelatedResponse:
+    """Return hybrid-scored related entities for an entity.
+
+    Hybrid scoring (0.4 + 0.3 + 0.3 = 1.0 max):
+    - Content similarity: FTS5 same-category title match (weight 0.4)
+    - Tag co-occurrence: shared tags > 2 (weight 0.3)
+    - Graph proximity: 2 hops, strength > 0.5 (weight 0.3)
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    items = await db.get_related_entities(entity_id, limit=limit)
+    return RelatedResponse(
+        entity_id=entity_id,
+        items=[RelatedEntityItem(**item) for item in items],
+        count=len(items),
+    )
