@@ -623,6 +623,86 @@ class Database:
         return items
 
 
+    async def get_tag_recommendations(self, entity_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Recommend candidate tags for an entity based on co-occurrence and FTS similarity.
+
+        Algorithm:
+        1. Co-occurrence: find entities sharing >2 tags, collect their other tags
+        2. FTS fallback: same-category similar entities, borrow their tags
+        Returns Top 10 tags sorted by co-occurrence frequency.
+        """
+        entity = await self.get_entity(entity_id)
+        if not entity:
+            return []
+
+        candidate_tags: dict[str, int] = {}  # tag -> co-occurrence count
+
+        # Get current entity's tags
+        async with self.conn.execute(
+            "SELECT tag FROM taggings WHERE entity_id = ?", (entity_id,)
+        ) as cur:
+            my_tags = {row[0] for row in await cur.fetchall()}
+
+        if my_tags:
+            # Co-occurrence: find other entities sharing tags, collect their other tags
+            tag_list = list(my_tags)
+            placeholders = ",".join("?" * len(tag_list))
+            async with self.conn.execute(
+                f"""
+                SELECT t1.tag, COUNT(DISTINCT t1.entity_id) AS cnt
+                FROM taggings t1
+                JOIN taggings t2 ON t1.tag = t2.tag AND t2.entity_id = ?
+                WHERE t1.entity_id != ?
+                GROUP BY t1.tag
+                HAVING cnt > 2
+                ORDER BY cnt DESC
+                LIMIT ?
+                """,
+                [entity_id, entity_id, limit],
+            ) as cur:
+                for row in await cur.fetchall():
+                    candidate_tags[row["tag"]] = row["cnt"]
+
+        # If fewer than limit candidates, supplement with FTS same-category entities' tags
+        if len(candidate_tags) < limit:
+            async with self.conn.execute(
+                """
+                SELECT e.id
+                FROM entities_fts f
+                JOIN entities e ON e.id = f.id
+                WHERE entities_fts MATCH ? AND e.category = ? AND e.id != ?
+                ORDER BY rank
+                LIMIT 5
+                """,
+                (entity["title"], entity["category"], entity_id),
+            ) as cur:
+                similar_rows = await cur.fetchall()
+
+            for row in similar_rows:
+                async with self.conn.execute(
+                    "SELECT tag FROM taggings WHERE entity_id = ?", (row["id"],)
+                ) as tag_cur:
+                    for tag_row in await tag_cur.fetchall():
+                        tag = tag_row[0]
+                        if tag not in my_tags:
+                            candidate_tags[tag] = candidate_tags.get(tag, 0) + 1
+
+        # Sort by count descending, take top limit
+        sorted_tags = sorted(candidate_tags.items(), key=lambda x: x[1], reverse=True)[:limit]
+        return [{"tag": tag, "score": count} for tag, count in sorted_tags]
+
+    async def set_entity_tags(self, entity_id: str, tags: list[str]) -> None:
+        """Replace all tags for an entity with the given list.
+
+        Caller manages transaction."""
+        await self.conn.execute("DELETE FROM taggings WHERE entity_id = ?", (entity_id,))
+        for tag in tags:
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO taggings (entity_id, tag) VALUES (?, ?)",
+                (entity_id, tag),
+            )
+
+
 # ---- FastAPI dependency ----
 
 _db_instance: Database | None = None
