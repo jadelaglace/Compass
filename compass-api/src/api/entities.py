@@ -126,6 +126,61 @@ def _calc_ref_strength(link_text: str) -> float:
             return strength
     return 1.0
 
+
+# ---- Maturity state machine ----
+
+from typing import Any  # re-imported here to avoid circular issues with quote annotations
+
+_MATURITY_UPGRADE: dict[str, dict[str, Any]] = {
+    "seedling": {"access_count": 5, "min_score": 5.0},
+    "growing": {"access_count": 15, "min_score": 6.5},
+}
+
+_MATURITY_DOWNGRADE: dict[str, dict[str, int]] = {
+    "seedling": {"days": 30},
+    "growing": {"days": 60},
+    "mature": {"days": 120},
+}
+
+
+def _check_and_update_maturity(
+    entity_id: str,
+    maturity: str,
+    access_count: int,
+    final_score: float,
+    last_boosted_at: Optional[str],
+    db: "Database",
+) -> Optional[str]:
+    """Check and apply maturity state transition.
+
+    Returns the new maturity if changed, else None.
+    Caller must manage transaction around this call."""
+    new_maturity: Optional[str] = None
+
+    # --- Check upgrade ---
+    upgrade = _MATURITY_UPGRADE.get(maturity)
+    if upgrade and access_count >= upgrade["access_count"] and final_score >= upgrade["min_score"]:
+        if maturity == "seedling":
+            new_maturity = "growing"
+        elif maturity == "growing":
+            new_maturity = "mature"
+
+    # --- Check downgrade (overrides upgrade if applicable) ---
+    downgrade = _MATURITY_DOWNGRADE.get(maturity)
+    if downgrade and last_boosted_at:
+        try:
+            last_dt = datetime.fromisoformat(last_boosted_at.replace("Z", "+00:00"))
+            days_idle = (datetime.now(tz=timezone.utc) - last_dt).days
+            if days_idle >= downgrade["days"]:
+                new_maturity = "seedling"  # all states degrade to seedling
+        except Exception:
+            pass
+
+    if new_maturity and new_maturity != maturity:
+        return new_maturity
+    return None
+
+
 # ---- entity ID normalization (mirrors FileWatcher's vault_path_to_entity_id) ----
 
 _STRIP_EXT_RE = re.compile(r"\.(md|MD|markdown|MARKDOWN)$")
@@ -736,6 +791,29 @@ async def record_access(
     except Exception:
         await db.rollback()
         raise
+
+    # ---- Maturity state machine check (after successful access record) ----
+    # Re-read current entity state (committed values)
+    updated_entity = await db.get_entity(entity_id)
+    if updated_entity:
+        current_maturity = updated_entity.get("maturity", "seedling")
+        new_mat = _check_and_update_maturity(
+            entity_id=entity_id,
+            maturity=current_maturity,
+            access_count=new_count,
+            final_score=new_final,
+            last_boosted_at=now_str,
+            db=db,
+        )
+        if new_mat:
+            await db.begin()
+            try:
+                await db.update_entity_maturity(entity_id, new_mat)
+                await db.log_event(entity_id, f"maturity_changed", trigger="auto", extra={"new_maturity": new_mat})
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
 
     return AccessResponse(
         entity_id=entity_id,
