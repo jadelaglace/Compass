@@ -140,16 +140,84 @@ class Database:
             (new_maturity, json.dumps(history), entity_id),
         )
 
+    async def set_entity_maturity_lock(self, entity_id: str, locked: bool) -> None:
+        """Set the maturity_locked flag on an entity. Caller manages transaction."""
+        await self.conn.execute(
+            "UPDATE entities SET maturity_locked = ? WHERE id = ?",
+            (int(locked), entity_id),
+        )
+
+    async def upsert_evolution_rule(self, data: dict[str, Any]) -> None:
+        """Insert or update an evolution rule. Caller manages transaction."""
+        await self.conn.execute(
+            """
+            INSERT INTO evolution_rules (id, category, upgrade_conditions, downgrade_conditions, locked, created_at, updated_at)
+            VALUES (:id, :category, :upgrade_conditions, :downgrade_conditions, :locked, :created_at, :updated_at)
+            ON CONFLICT(id) DO UPDATE SET
+                category = excluded.category,
+                upgrade_conditions = excluded.upgrade_conditions,
+                downgrade_conditions = excluded.downgrade_conditions,
+                locked = excluded.locked,
+                updated_at = excluded.updated_at
+            """,
+            {
+                "id": data["id"],
+                "category": data["category"],
+                "upgrade_conditions": json.dumps(data.get("upgrade_conditions", {})),
+                "downgrade_conditions": json.dumps(data.get("downgrade_conditions", {})),
+                "locked": int(data.get("locked", False)),
+                "created_at": data.get("created_at", datetime.now(tz=timezone.utc).isoformat()),
+                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+        )
+
+    async def get_evolution_rule(self, category: str) -> Optional[dict[str, Any]]:
+        """Fetch an evolution rule by category, or None if not found."""
+        async with self.conn.execute(
+            "SELECT * FROM evolution_rules WHERE category = ?", (category,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        # Deserialize JSON fields
+        result["upgrade_conditions"] = json.loads(result.get("upgrade_conditions") or "{}")
+        result["downgrade_conditions"] = json.loads(result.get("downgrade_conditions") or "{}")
+        result["locked"] = bool(result["locked"])
+        return result
+
+    async def get_all_evolution_rules(self) -> list[dict[str, Any]]:
+        """Return all evolution rules."""
+        async with self.conn.execute("SELECT * FROM evolution_rules ORDER BY category") as cur:
+            rows = await cur.fetchall()
+        results = []
+        for row in rows:
+            result = dict(row)
+            result["upgrade_conditions"] = json.loads(result.get("upgrade_conditions") or "{}")
+            result["downgrade_conditions"] = json.loads(result.get("downgrade_conditions") or "{}")
+            result["locked"] = bool(result["locked"])
+            results.append(result)
+        return results
+
+    async def delete_evolution_rule(self, category: str) -> bool:
+        """Delete an evolution rule by category. Returns True if deleted, False if not found."""
+        cursor = await self.conn.execute(
+            "DELETE FROM evolution_rules WHERE category = ?", (category,)
+        )
+        return cursor.rowcount > 0
+
     async def upsert_entity(self, data: dict[str, Any]) -> None:
         """Insert or update an entity. Caller manages transaction."""
         await self.conn.execute(
             """
             INSERT INTO entities (id, file_path, vault_path, title, category,
                                    created_at, updated_at, last_boosted_at,
-                                   has_attachments, attachment_refs, metadata)
+                                   has_attachments, attachment_refs, metadata,
+                                   maturity, maturity_locked)
             VALUES (:id, :file_path, :vault_path, :title, :category,
                     :created_at, :updated_at, :last_boosted_at,
-                    :has_attachments, :attachment_refs, :metadata)
+                    :has_attachments, :attachment_refs, :metadata,
+                    :maturity, :maturity_locked)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 category = excluded.category,
@@ -157,7 +225,9 @@ class Database:
                 last_boosted_at = excluded.last_boosted_at,
                 has_attachments = excluded.has_attachments,
                 attachment_refs = excluded.attachment_refs,
-                metadata = excluded.metadata
+                metadata = excluded.metadata,
+                maturity = excluded.maturity,
+                maturity_locked = excluded.maturity_locked
             """,
             {
                 "id": data["id"],
@@ -171,6 +241,8 @@ class Database:
                 "has_attachments": int(data.get("has_attachments", False)),
                 "attachment_refs": json.dumps(data.get("attachment_refs", [])),
                 "metadata": json.dumps(data.get("metadata", {})),
+                "maturity": data.get("maturity", "seedling"),
+                "maturity_locked": int(data.get("maturity_locked", False)),
             },
         )
         # NOTE: no commit() here — caller controls transaction
@@ -609,15 +681,25 @@ class Database:
             rows = await cur.fetchall()
 
         items = []
+        item_map: dict[str, dict] = {}
         for row in rows:
             item = dict(row)
             item["related_score"] = round(scores.get(item["id"], 0), 3)
-            # Attach tags
-            async with self.conn.execute(
-                "SELECT tag FROM taggings WHERE entity_id = ?", (item["id"],)
-            ) as tag_cur:
-                item["tags"] = [r[0] for r in await tag_cur.fetchall()]
+            item["tags"] = []  # will be filled by batch query
             items.append(item)
+            item_map[item["id"]] = item
+
+        # Batch-fetch all tags for related entities at once
+        if sorted_ids:
+            placeholders = ",".join("?" * len(sorted_ids))
+            async with self.conn.execute(
+                f"SELECT entity_id, tag FROM taggings WHERE entity_id IN ({placeholders})",
+                sorted_ids,
+            ) as tag_cur:
+                for row in await tag_cur.fetchall():
+                    eid = row["entity_id"]
+                    if eid in item_map:
+                        item_map[eid]["tags"].append(row["tag"])
 
         items.sort(key=lambda x: x["related_score"], reverse=True)
         return items

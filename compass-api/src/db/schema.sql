@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS entities (
     parent_id       TEXT REFERENCES entities(id),
     maturity        TEXT NOT NULL DEFAULT 'seedling',
     maturity_history TEXT,
+    maturity_locked INTEGER DEFAULT 0,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     last_boosted_at TEXT,
@@ -99,6 +100,17 @@ CREATE TABLE IF NOT EXISTS insights (
 CREATE INDEX IF NOT EXISTS idx_insights_entity ON insights(entity_id);
 CREATE INDEX IF NOT EXISTS idx_insights_maturity ON insights(maturity);
 
+-- Evolution rules for per-category maturity policy
+CREATE TABLE IF NOT EXISTS evolution_rules (
+    id                   TEXT PRIMARY KEY,
+    category             TEXT UNIQUE,
+    upgrade_conditions   TEXT,   -- JSON: {"access_count": int, "min_score": float}
+    downgrade_conditions TEXT,   -- JSON: {"days": int}
+    locked               INTEGER DEFAULT 0,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
+);
+
 -- FTS5 full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
     id,
@@ -120,6 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_timeline_entity ON timeline_events(entity_id);
 CREATE INDEX IF NOT EXISTS idx_taggings_tag ON taggings(tag);
 CREATE INDEX IF NOT EXISTS idx_score_history_entity ON score_history(entity_id);
 CREATE INDEX IF NOT EXISTS idx_score_history_created ON score_history(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evolution_rules_category ON evolution_rules(category);
 
 -- FTS5 sync triggers
 -- NOTE: FTS5 plain tables support DELETE statements directly

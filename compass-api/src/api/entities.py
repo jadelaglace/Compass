@@ -127,51 +127,60 @@ def _calc_ref_strength(link_text: str) -> float:
     return 1.0
 
 
-# ---- Maturity state machine ----
+# ---- Maturity state machine (with configurable evolution rules) ----
 
 from typing import Any  # re-imported here to avoid circular issues with quote annotations
 
-_MATURITY_UPGRADE: dict[str, dict[str, Any]] = {
+# Default evolution rules when no per-category rule exists
+_DEFAULT_UPGRADE: dict[str, dict[str, Any]] = {
     "seedling": {"access_count": 5, "min_score": 5.0},
     "growing": {"access_count": 15, "min_score": 6.5},
 }
 
-_MATURITY_DOWNGRADE: dict[str, dict[str, int]] = {
+_DEFAULT_DOWNGRADE: dict[str, dict[str, int]] = {
     "seedling": {"days": 30},
     "growing": {"days": 60},
     "mature": {"days": 120},
 }
 
 
-def _check_and_update_maturity(
-    entity_id: str,
+async def _get_evolution_rule(db: "Database", category: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Get evolution rule for a category, falling back to defaults."""
+    rule = await db.get_evolution_rule(category)
+    if rule:
+        return rule["upgrade_conditions"], rule["downgrade_conditions"]
+    return _DEFAULT_UPGRADE, _DEFAULT_DOWNGRADE
+
+
+def _apply_maturity_transition(
     maturity: str,
+    upgrade_conds: dict[str, Any],
+    downgrade_conds: dict[str, Any],
     access_count: int,
     final_score: float,
     last_boosted_at: Optional[str],
-    db: "Database",
 ) -> Optional[str]:
-    """Check and apply maturity state transition.
+    """Evaluate upgrade/downgrade rules and return new maturity or None.
 
-    Returns the new maturity if changed, else None.
-    Caller must manage transaction around this call."""
+    Downgrade takes precedence over upgrade if both could apply.
+    """
     new_maturity: Optional[str] = None
 
     # --- Check upgrade ---
-    upgrade = _MATURITY_UPGRADE.get(maturity)
-    if upgrade and access_count >= upgrade["access_count"] and final_score >= upgrade["min_score"]:
+    upgrade = upgrade_conds.get(maturity)
+    if upgrade and access_count >= upgrade.get("access_count", 0) and final_score >= upgrade.get("min_score", 0.0):
         if maturity == "seedling":
             new_maturity = "growing"
         elif maturity == "growing":
             new_maturity = "mature"
 
     # --- Check downgrade (overrides upgrade if applicable) ---
-    downgrade = _MATURITY_DOWNGRADE.get(maturity)
+    downgrade = downgrade_conds.get(maturity)
     if downgrade and last_boosted_at:
         try:
             last_dt = datetime.fromisoformat(last_boosted_at.replace("Z", "+00:00"))
             days_idle = (datetime.now(tz=timezone.utc) - last_dt).days
-            if days_idle >= downgrade["days"]:
+            if days_idle >= downgrade.get("days", 0):
                 new_maturity = "seedling"  # all states degrade to seedling
         except Exception:
             pass
@@ -179,6 +188,26 @@ def _check_and_update_maturity(
     if new_maturity and new_maturity != maturity:
         return new_maturity
     return None
+
+
+async def _check_and_update_maturity(
+    entity_id: str,
+    maturity: str,
+    category: str,
+    access_count: int,
+    final_score: float,
+    last_boosted_at: Optional[str],
+    db: "Database",
+) -> Optional[str]:
+    """Check and apply maturity state transition using per-category evolution rules.
+
+    Returns the new maturity if changed, else None.
+    Caller must manage transaction around this call."""
+    upgrade_conds, downgrade_conds = await _get_evolution_rule(db, category)
+    return _apply_maturity_transition(
+        maturity, upgrade_conds, downgrade_conds,
+        access_count, final_score, last_boosted_at,
+    )
 
 
 # ---- entity ID normalization (mirrors FileWatcher's vault_path_to_entity_id) ----
@@ -797,23 +826,26 @@ async def record_access(
     updated_entity = await db.get_entity(entity_id)
     if updated_entity:
         current_maturity = updated_entity.get("maturity", "seedling")
-        new_mat = _check_and_update_maturity(
-            entity_id=entity_id,
-            maturity=current_maturity,
-            access_count=new_count,
-            final_score=new_final,
-            last_boosted_at=now_str,
-            db=db,
-        )
-        if new_mat:
-            await db.begin()
-            try:
-                await db.update_entity_maturity(entity_id, new_mat)
-                await db.log_event(entity_id, f"maturity_changed", trigger="auto", extra={"new_maturity": new_mat})
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
+        maturity_locked = bool(updated_entity.get("maturity_locked"))
+        if not maturity_locked:
+            new_mat = await _check_and_update_maturity(
+                entity_id=entity_id,
+                maturity=current_maturity,
+                category=updated_entity.get("category", "Inbox"),
+                access_count=new_count,
+                final_score=new_final,
+                last_boosted_at=now_str,
+                db=db,
+            )
+            if new_mat:
+                await db.begin()
+                try:
+                    await db.update_entity_maturity(entity_id, new_mat)
+                    await db.log_event(entity_id, "maturity_changed", trigger="auto", extra={"new_maturity": new_mat})
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    raise
 
     return AccessResponse(
         entity_id=entity_id,
@@ -983,3 +1015,138 @@ async def update_tags(
         await db.rollback()
         raise
     return {"entity_id": entity_id, "tags": update.tags}
+
+
+# ---- P3-Maturity-2: Manual maturity lock/update endpoint ----
+
+class MaturityUpdate(BaseModel):
+    locked: Optional[bool] = None
+    maturity: Optional[str] = None  # e.g. "seedling", "growing", "mature"
+
+
+@router.patch("/{entity_id}/maturity")
+async def update_maturity(
+    entity_id: str,
+    update: MaturityUpdate,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """Set maturity_locked flag and/or force a specific maturity level.
+
+    - locked=True → prevent auto-evolution for this entity
+    - maturity=X  → directly set maturity (used with or without locked)
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    await db.begin()
+    try:
+        if update.locked is not None:
+            await db.set_entity_maturity_lock(entity_id, update.locked)
+            await db.log_event(
+                entity_id,
+                "maturity_locked" if update.locked else "maturity_unlocked",
+                trigger="api",
+            )
+        if update.maturity is not None:
+            await db.update_entity_maturity(entity_id, update.maturity)
+            await db.log_event(
+                entity_id,
+                "maturity_changed",
+                trigger="manual",
+                extra={"new_maturity": update.maturity},
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    return {
+        "entity_id": entity_id,
+        "maturity": update.maturity or entity.get("maturity"),
+        "maturity_locked": update.locked if update.locked is not None else bool(entity.get("maturity_locked")),
+    }
+
+
+# ---- P3-AutoRelate-2: Auto-create bidirectional reference edges ----
+
+class RelateRequest(BaseModel):
+    limit: int = Field(default=10, ge=1, le=50)
+    strength: float = Field(default=1.0, ge=0.0, le=2.0)
+    dry_run: bool = Field(default=False, description="If true, return what would be created without creating")
+
+
+class RelateResponse(BaseModel):
+    entity_id: str
+    created: list[dict]
+    skipped: list[dict]
+    total_created: int
+    total_skipped: int
+
+
+@router.post("/{entity_id}/relate", response_model=RelateResponse)
+async def auto_relate_entities(
+    entity_id: str,
+    request: RelateRequest,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> RelateResponse:
+    """Automatically create bidirectional reference edges to related entities.
+
+    Uses P3-AutoRelate-1's hybrid scoring to find top related entities,
+    then creates bidirectional edges: source→target (strength) and
+    target→source (strength*0.5).
+
+    Idempotent: if edge already exists, it's skipped (not duplicated).
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    related = await db.get_related_entities(entity_id, limit=request.limit)
+
+    created: list[dict] = []
+    skipped: list[dict] = []
+
+    for rel in related:
+        rel_id = rel["id"]
+        forward = (entity_id, rel_id, request.strength)
+        reverse = (rel_id, entity_id, round(request.strength * 0.5, 2))
+
+        # Check if forward edge already exists
+        async with db.conn.execute(
+            'SELECT 1 FROM "references" WHERE source_id = ? AND target_id = ?',
+            (entity_id, rel_id),
+        ) as cur:
+            exists = await cur.fetchone()
+
+        if exists:
+            skipped.append({"target_id": rel_id, "reason": "edge_exists"})
+            continue
+
+        if not request.dry_run:
+            await db.upsert_reference(entity_id, rel_id, request.strength)
+
+        created.append({
+            "source_id": entity_id,
+            "target_id": rel_id,
+            "strength": request.strength,
+        })
+        created.append({
+            "source_id": rel_id,
+            "target_id": entity_id,
+            "strength": reverse[2],
+        })
+
+    if created and not request.dry_run:
+        await db.log_event(entity_id, "related", trigger="auto", extra={
+            "created": len(created) // 2,
+            "targets": [rel["id"] for rel in related],
+        })
+
+    return RelateResponse(
+        entity_id=entity_id,
+        created=created,
+        skipped=skipped,
+        total_created=len(created) // 2,
+        total_skipped=len(skipped),
+    )
