@@ -155,38 +155,36 @@ async def preview_decay(
     now = datetime.now(tz=timezone.utc)
     future_dt = now + timedelta(days=days)
 
-    score_result = await rust_client.compute_score(
-        interest=float(score.get("interest", 5.0)),
-        strategy=float(score.get("strategy", 5.0)),
-        consensus=float(score.get("consensus", 0.0)),
-        last_boosted_at=score.get("last_boosted_at", now.isoformat()),
-        interest_half_life_days=float(score.get("interest_half_life_days", 30.0)),
-        strategy_half_life_days=float(score.get("strategy_half_life_days", 365.0)),
-        consensus_half_life_days=float(score.get("consensus_half_life_days", 60.0)),
-    )
-
     current_score = score.get("final_score", 0.0)
-    future_score = round(score_result.final_score, 2)
+    last_boosted_at = score.get("last_boosted_at", now.isoformat())
 
-    # Compute per-component decayed values using exponential decay formula
-    # Rust binary returns final_score + days_elapsed; we derive component decay
-    days_elapsed = score_result.days_elapsed
+    # Decay from last_boosted_at to the future point (days ahead of now)
     interest_hl = float(score.get("interest_half_life_days", 30.0))
     strategy_hl = float(score.get("strategy_half_life_days", 365.0))
     consensus_hl = float(score.get("consensus_half_life_days", 60.0))
     interest_init = float(score.get("interest", 5.0))
     strategy_init = float(score.get("strategy", 5.0))
     consensus_init = float(score.get("consensus", 0.0))
-    interest_decayed = interest_init * (0.5 ** (days_elapsed / interest_hl))
-    strategy_decayed = strategy_init * (0.5 ** (days_elapsed / strategy_hl))
-    consensus_decayed = consensus_init * (0.5 ** (days_elapsed / consensus_hl))
+
+    try:
+        lb_dt = datetime.fromisoformat(last_boosted_at.replace("Z", "+00:00"))
+        future_days = (future_dt - lb_dt).total_seconds() / 86400.0
+        future_days = max(0.0, future_days)
+    except Exception:
+        future_days = float(days)
+
+    interest_decayed = interest_init * (0.5 ** (future_days / interest_hl))
+    strategy_decayed = strategy_init * (0.5 ** (future_days / strategy_hl))
+    consensus_decayed = consensus_init * (0.5 ** (future_days / consensus_hl))
+    future_score = round(interest_decayed * 0.4 + strategy_decayed * 0.4 + consensus_decayed * 0.2, 2)
+    days_remaining = round(interest_hl * 3.32, 1) if interest_hl > 0 else 0.0
 
     return DecayPreviewResponse(
         entity_id=entity_id,
         current_score=round(current_score, 2),
         future_score=future_score,
-        days_elapsed=days,
-        days_remaining=round(score_result.days_elapsed, 1),
+        days_elapsed=round(future_days, 1),
+        days_remaining=days_remaining,
         decayed_components={
             "interest": round(interest_decayed, 4),
             "strategy": round(strategy_decayed, 4),
@@ -259,25 +257,29 @@ async def simulate_decay(
         consensus=consensus_val,
     ))
 
+    # Parse last_boosted_at for trajectory computation
+    try:
+        lb_dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+    except Exception:
+        lb_dt = now
+
     for step in range(step_days, days + 1, step_days):
         future_dt = now + timedelta(days=step)
-        result = await rust_client.compute_score(
-            interest=interest_val,
-            strategy=strategy_val,
-            consensus=consensus_val,
-            last_boosted_at=start_iso,
-            interest_half_life_days=interest_hl,
-            strategy_half_life_days=strategy_hl,
-            consensus_half_life_days=consensus_hl,
-        )
-        days_e = result.days_elapsed
+        # days from last_boosted_at to this future point
+        days_from_boost = (future_dt - lb_dt).total_seconds() / 86400.0
+        days_from_boost = max(0.0, days_from_boost)
         trajectory.append(SimulatorEntry(
             day=step,
             date=future_dt.strftime("%Y-%m-%d"),
-            final_score=round(result.final_score, 2),
-            interest=round(interest_val * (0.5 ** (days_e / interest_hl)), 4),
-            strategy=round(strategy_val * (0.5 ** (days_e / strategy_hl)), 4),
-            consensus=round(consensus_val * (0.5 ** (days_e / consensus_hl)), 4),
+            final_score=round(
+                interest_val * (0.5 ** (days_from_boost / interest_hl)) * 0.4 +
+                strategy_val * (0.5 ** (days_from_boost / strategy_hl)) * 0.4 +
+                consensus_val * (0.5 ** (days_from_boost / consensus_hl)) * 0.2,
+                2,
+            ),
+            interest=round(interest_val * (0.5 ** (days_from_boost / interest_hl)), 4),
+            strategy=round(strategy_val * (0.5 ** (days_from_boost / strategy_hl)), 4),
+            consensus=round(consensus_val * (0.5 ** (days_from_boost / consensus_hl)), 4),
         ))
 
     start_score = trajectory[0].final_score
