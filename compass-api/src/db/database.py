@@ -122,6 +122,24 @@ class Database:
 
     # ---- entities ----
 
+    async def update_entity_maturity(self, entity_id: str, new_maturity: str) -> None:
+        """Update entity maturity and append to maturity_history.
+
+        Caller manages transaction."""
+        now = datetime.now(tz=timezone.utc).isoformat()
+        async with self.conn.execute(
+            "SELECT maturity, maturity_history FROM entities WHERE id = ?", (entity_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        history = json.loads(row["maturity_history"] or "[]")
+        history.append({"from": row["maturity"], "to": new_maturity, "at": now})
+        await self.conn.execute(
+            "UPDATE entities SET maturity = ?, maturity_history = ? WHERE id = ?",
+            (new_maturity, json.dumps(history), entity_id),
+        )
+
     async def upsert_entity(self, data: dict[str, Any]) -> None:
         """Insert or update an entity. Caller manages transaction."""
         await self.conn.execute(
