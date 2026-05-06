@@ -410,7 +410,6 @@ async def list_entities(
     )
 
 
-@router.put("/{entity_id}", response_model=EntityResponse)
 # ---- Timeline-2: GET /entities/timeline ----
 
 class TimelineItem(BaseModel):
@@ -523,6 +522,7 @@ async def get_entities_timeline(
     ]
     has_more = (offset + limit) < total
     return TimelineResponse(items=items, total=total, has_more=has_more)
+@router.put("/{entity_id}", response_model=EntityResponse)
 async def update_entity(
     entity_id: str,
     update: EntityCreate,
