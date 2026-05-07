@@ -166,6 +166,84 @@ async def list_insights(
     )
 
 
+
+
+# ---- Insight-3: Export ----
+
+@router.get("/export")
+async def export_insights(
+    maturity: Annotated[Optional[str], Query(description="Filter by maturity")] = None,
+    format: Annotated[str, Query(description="json | markdown")] = "json",
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    if format not in ("json", "markdown"):
+        raise HTTPException(status_code=422, detail="format must be json or markdown")
+
+    items, _total = await db.list_insights(maturity=maturity, limit=10000, offset=0)
+
+    if format == "markdown":
+        lines = ["# Insights Export\n\n"]
+        for item in items:
+            lines.append(f"## {item['title']}\n")
+            lines.append(f"**ID:** `{item['id']}`  **Maturity:** {item['maturity']}\n")
+            lines.append(f"**Entity:** `{item['entity_id']}`  **Source:** {item['source_type']}\n")
+            lines.append(f"Created: {item['created_at']}  Updated: {item['updated_at']}\n")
+            if item.get("content"):
+                lines.append(f"\n{item['content']}\n")
+            lines.append("---\n")
+        return {"format": "markdown", "content": "".join(lines)}
+
+    return {
+        "format": "json",
+        "total": len(items),
+        "items": [
+            {
+                "id": item["id"],
+                "entity_id": item["entity_id"],
+                "title": item["title"],
+                "content": item.get("content"),
+                "maturity": item["maturity"],
+                "source_type": item["source_type"],
+                "created_at": item["created_at"],
+                "updated_at": item["updated_at"],
+            }
+            for item in items
+        ],
+    }
+
+
+
+
+@router.get("/entity/{entity_id}/export")
+async def export_entity_insights(
+    entity_id: str,
+    format: Annotated[str, Query(description="json | markdown")] = "json",
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    if format not in ("json", "markdown"):
+        raise HTTPException(status_code=422, detail="format must be json or markdown")
+
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    items, _total = await db.list_insights(maturity=None, limit=10000, offset=0)
+    entity_insights = [item for item in items if item["entity_id"] == entity_id]
+
+    if format == "markdown":
+        lines = [f"# Insights for: {entity['title']}\n\n"]
+        for item in entity_insights:
+            lines.append(f"## {item['title']}\n")
+            lines.append(f"**Maturity:** {item['maturity']}  **Source:** {item['source_type']}\n")
+            lines.append(f"Created: {item['created_at']}\n")
+            if item.get("content"):
+                lines.append(f"\n{item['content']}\n")
+            lines.append("---\n")
+        return {"format": "markdown", "content": "".join(lines)}
+
+    return {"format": "json", "entity_id": entity_id, "total": len(entity_insights), "items": entity_insights}
+
+
 @router.get("/{insight_id}", response_model=InsightResponse)
 async def get_insight(
     insight_id: str,
@@ -280,107 +358,3 @@ async def evolve_entity_from_insight(
         detail=f"Entity evolved from {current} to {next_m}",
     )
 
-
-# ---- Insight-3: Export ----
-
-@router.get("/export")
-async def export_insights(
-    maturity: Annotated[Optional[str], Query(description="Filter by maturity")] = None,
-    format: Annotated[str, Query(description="json | markdown")] = "json",
-    db: Annotated[Database, Depends(get_db)] = None,
-) -> dict:
-    if format not in ("json", "markdown"):
-        raise HTTPException(status_code=422, detail="format must be json or markdown")
-
-    items, _total = await db.list_insights(maturity=maturity, limit=10000, offset=0)
-
-    if format == "markdown":
-        lines = ["# Insights Export\n\n"]
-        for item in items:
-            lines.append(f"## {item['title']}\n")
-            lines.append(f"**ID:** `{item['id']}`  **Maturity:** {item['maturity']}\n")
-            lines.append(f"**Entity:** `{item['entity_id']}`  **Source:** {item['source_type']}\n")
-            lines.append(f"Created: {item['created_at']}  Updated: {item['updated_at']}\n")
-            if item.get("content"):
-                lines.append(f"\n{item['content']}\n")
-            lines.append("---\n")
-        return {"format": "markdown", "content": "".join(lines)}
-
-    return {
-        "format": "json",
-        "total": len(items),
-        "items": [
-            {
-                "id": item["id"],
-                "entity_id": item["entity_id"],
-                "title": item["title"],
-                "content": item.get("content"),
-                "maturity": item["maturity"],
-                "source_type": item["source_type"],
-                "created_at": item["created_at"],
-                "updated_at": item["updated_at"],
-            }
-            for item in items
-        ],
-    }
-
-
-@router.get("/{insight_id}/export")
-async def export_insight(
-    insight_id: str,
-    format: Annotated[str, Query(description="json | markdown")] = "json",
-    db: Annotated[Database, Depends(get_db)] = None,
-) -> dict:
-    if format not in ("json", "markdown"):
-        raise HTTPException(status_code=422, detail="format must be json or markdown")
-
-    insight = await db.get_insight(insight_id)
-    if not insight:
-        raise HTTPException(status_code=404, detail="Insight not found")
-
-    entity = await db.get_entity(insight["entity_id"])
-    title = entity["title"] if entity else insight["entity_id"]
-
-    if format == "markdown":
-        lines = [
-            f"# {insight['title']}\n",
-            f"**Insight ID:** `{insight['id']}`\n",
-            f"**Entity:** {title} (`{insight['entity_id']}`)\n",
-            f"**Maturity:** {insight['maturity']}  **Source:** {insight['source_type']}\n",
-            f"Created: {insight['created_at']}  Updated: {insight['updated_at']}\n",
-        ]
-        if insight.get("content"):
-            lines.append(f"\n## Content\n\n{insight['content']}\n")
-        return {"format": "markdown", "content": "".join(lines)}
-
-    return {"format": "json", "item": insight}
-
-
-@router.get("/entity/{entity_id}/export")
-async def export_entity_insights(
-    entity_id: str,
-    format: Annotated[str, Query(description="json | markdown")] = "json",
-    db: Annotated[Database, Depends(get_db)] = None,
-) -> dict:
-    if format not in ("json", "markdown"):
-        raise HTTPException(status_code=422, detail="format must be json or markdown")
-
-    entity = await db.get_entity(entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="Entity not found")
-
-    items, _total = await db.list_insights(maturity=None, limit=10000, offset=0)
-    entity_insights = [item for item in items if item["entity_id"] == entity_id]
-
-    if format == "markdown":
-        lines = [f"# Insights for: {entity['title']}\n\n"]
-        for item in entity_insights:
-            lines.append(f"## {item['title']}\n")
-            lines.append(f"**Maturity:** {item['maturity']}  **Source:** {item['source_type']}\n")
-            lines.append(f"Created: {item['created_at']}\n")
-            if item.get("content"):
-                lines.append(f"\n{item['content']}\n")
-            lines.append("---\n")
-        return {"format": "markdown", "content": "".join(lines)}
-
-    return {"format": "json", "entity_id": entity_id, "total": len(entity_insights), "items": entity_insights}
