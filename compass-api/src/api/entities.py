@@ -654,6 +654,9 @@ async def delete_entity(entity_id: str, db: Annotated[Database, Depends(get_db)]
         await db.conn.execute('DELETE FROM "references" WHERE source_id = ? OR target_id = ?', (entity_id, entity_id))
         await db.conn.execute("DELETE FROM timeline_events WHERE entity_id = ?", (entity_id,))
         await db.conn.execute("DELETE FROM scores WHERE entity_id = ?", (entity_id,))
+        await db.conn.execute("DELETE FROM taggings WHERE entity_id = ?", (entity_id,))
+        await db.conn.execute("DELETE FROM score_history WHERE entity_id = ?", (entity_id,))
+        await db.conn.execute("DELETE FROM insights WHERE entity_id = ?", (entity_id,))
         await db.conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
         await db.commit()
     except Exception:
