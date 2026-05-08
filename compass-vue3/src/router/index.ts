@@ -26,6 +26,11 @@ const routes = [
     component: () => import('@/views/feed/FeedView.vue'),
   },
   {
+    path: '/timeline',
+    name: 'timeline',
+    component: () => import('@/views/timeline/TimelineView.vue'),
+  },
+  {
     path: '/insights',
     name: 'insights',
     component: () => import('@/views/insights/InsightsView.vue'),
