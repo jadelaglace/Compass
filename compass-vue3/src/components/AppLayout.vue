@@ -39,13 +39,13 @@ const appStore = useAppStore()
 .content {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
-  background: #f5f5f5;
+  padding: var(--space-6);
+  background: var(--bg-secondary);
 }
 
 .fade-slide-enter-active,
 .fade-slide-leave-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition: opacity var(--transition-normal), transform var(--transition-normal);
 }
 
 .fade-slide-enter-from {

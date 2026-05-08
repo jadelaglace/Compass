@@ -1,11 +1,11 @@
 <script setup lang="ts">
-// Entity list view — stub
+// Entity list view — stub (Phase 4 Tier 1)
 </script>
 
 <template>
   <div class="view">
     <h1>📚 知识库</h1>
-    <p>实体列表页面（Phase 4 Tier 1）</p>
+    <p class="desc">实体列表页面（Phase 4 Tier 1）</p>
   </div>
 </template>
 
@@ -13,8 +13,16 @@
 .view {
   max-width: 960px;
 }
+
 h1 {
-  margin-bottom: 16px;
-  color: #1a1a2e;
+  margin-bottom: var(--space-4);
+  color: var(--text-primary);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+}
+
+.desc {
+  color: var(--text-secondary);
+  font-size: var(--text-md);
 }
 </style>
