@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import ThemeToggle from '@/components/ThemeToggle.vue'
 
 const router = useRouter()
 const searchQuery = ref('')
@@ -25,6 +26,7 @@ const handleSearch = () => {
       />
     </div>
     <div class="top-bar-right">
+      <ThemeToggle />
       <span class="user-info">👤 dbb</span>
     </div>
   </header>
@@ -33,12 +35,12 @@ const handleSearch = () => {
 <style scoped>
 .top-bar {
   height: 56px;
-  background: #fff;
-  border-bottom: 1px solid #e0e0e0;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
-  padding: 0 24px;
-  gap: 16px;
+  padding: 0 var(--space-6);
+  gap: var(--space-4);
   flex-shrink: 0;
 }
 
@@ -49,26 +51,33 @@ const handleSearch = () => {
 
 .search-input {
   width: 100%;
-  padding: 8px 16px;
-  border: 1px solid #e0e0e0;
-  border-radius: 20px;
-  font-size: 14px;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  font-size: var(--text-base);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
 }
 
 .search-input:focus {
-  border-color: #3a3a6a;
+  border-color: var(--color-brand);
+  background: var(--bg-primary);
 }
 
 .top-bar-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .user-info {
-  font-size: 14px;
-  color: #666;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 </style>

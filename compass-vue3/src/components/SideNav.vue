@@ -36,11 +36,11 @@ const navItems = [
 <style scoped>
 .side-nav {
   width: 200px;
-  background: #1a1a2e;
-  color: #fff;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
   display: flex;
   flex-direction: column;
-  transition: width 0.3s ease;
+  transition: width var(--transition-normal);
   flex-shrink: 0;
 }
 
@@ -51,25 +51,28 @@ const navItems = [
 .nav-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 16px;
-  font-size: 18px;
-  font-weight: bold;
-  border-bottom: 1px solid #2a2a4a;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  border-bottom: 1px solid var(--sidebar-hover-bg);
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .logo {
   font-size: 22px;
+  flex-shrink: 0;
 }
 
 .logo-text {
-  white-space: nowrap;
+  overflow: hidden;
 }
 
 .nav-list {
   flex: 1;
   list-style: none;
-  padding: 8px;
+  padding: var(--space-2);
   margin: 0;
   overflow-y: auto;
 }
@@ -77,23 +80,23 @@ const navItems = [
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 8px;
-  color: #a0a0c0;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-2);
+  color: var(--sidebar-text);
   text-decoration: none;
-  border-radius: 6px;
-  transition: background 0.15s, color 0.15s;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast), color var(--transition-fast);
   margin-bottom: 2px;
+  white-space: nowrap;
 }
 
 .nav-item:hover {
-  background: #2a2a4a;
-  color: #fff;
+  background: var(--sidebar-hover-bg);
+  text-decoration: none;
 }
 
 .nav-item.router-link-active {
-  background: #3a3a6a;
-  color: #fff;
+  background: var(--sidebar-active-bg);
 }
 
 .nav-icon {
@@ -102,23 +105,23 @@ const navItems = [
 }
 
 .nav-label {
-  white-space: nowrap;
-  font-size: 14px;
+  font-size: var(--text-sm);
+  overflow: hidden;
 }
 
 .toggle-btn {
-  margin: 12px;
-  padding: 8px;
-  background: #2a2a4a;
+  margin: var(--space-3);
+  padding: var(--space-2);
+  background: var(--sidebar-hover-bg);
   border: none;
-  color: #a0a0c0;
-  border-radius: 6px;
+  color: var(--sidebar-text);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--text-sm);
+  transition: background var(--transition-fast);
 }
 
 .toggle-btn:hover {
-  background: #3a3a6a;
-  color: #fff;
+  background: var(--sidebar-active-bg);
 }
 </style>
