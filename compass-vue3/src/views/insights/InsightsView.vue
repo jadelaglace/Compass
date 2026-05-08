@@ -1,11 +1,64 @@
 <script setup lang="ts">
-// Insights view — stub (Phase 4 Tier 3)
+import { ref } from 'vue'
+import { useInsightsStore, type Insight } from '@/stores/insights'
+import InsightCard from '@/components/insights/InsightCard.vue'
+import InsightForm from '@/components/insights/InsightForm.vue'
+
+const store = useInsightsStore()
+const showModal = ref(false)
+const editingInsight = ref<Insight | null>(null)
+
+function openNew() {
+  editingInsight.value = null
+  showModal.value = true
+}
+
+function openEdit(id: string) {
+  editingInsight.value = store.insights.find(i => i.id === id) ?? null
+  showModal.value = true
+}
+
+function handleDelete(id: string) {
+  if (confirm('确定删除这条洞察？')) {
+    store.deleteInsight(id)
+  }
+}
+
+function handleSave(data: { content: string; maturity: import('@/stores/insights').Maturity; entity_title: string; entity_id: string }) {
+  if (editingInsight.value) {
+    store.updateInsight(editingInsight.value.id, data)
+  } else {
+    store.addInsight(data)
+  }
+}
 </script>
 
 <template>
   <div class="view">
-    <h1>💡 洞察</h1>
-    <p class="desc">系统洞察与分析（Phase 4 Tier 3）</p>
+    <div class="view-header">
+      <h1>💡 洞察</h1>
+      <button class="btn-new" @click="openNew">+ 新建洞察</button>
+    </div>
+
+    <div v-if="store.insights.length === 0" class="empty">
+      <p>暂无洞察</p>
+    </div>
+    <div v-else class="insights-grid">
+      <InsightCard
+        v-for="insight in store.insights"
+        :key="insight.id"
+        :insight="insight"
+        @edit="openEdit"
+        @delete="handleDelete"
+      />
+    </div>
+
+    <InsightForm
+      :show="showModal"
+      :insight="editingInsight"
+      @close="showModal = false"
+      @save="handleSave"
+    />
   </div>
 </template>
 
@@ -14,15 +67,42 @@
   max-width: 960px;
 }
 
-h1 {
-  margin-bottom: var(--space-4);
-  color: var(--text-primary);
-  font-size: var(--text-2xl);
-  font-weight: var(--weight-semibold);
+.view-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-5);
 }
 
-.desc {
-  color: var(--text-secondary);
-  font-size: var(--text-md);
+h1 {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.btn-new {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-brand);
+  color: var(--text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.btn-new:hover { background: var(--color-brand-dark); }
+
+.insights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--space-4);
+}
+
+.empty {
+  text-align: center;
+  padding: var(--space-16);
+  color: var(--text-muted);
 }
 </style>
