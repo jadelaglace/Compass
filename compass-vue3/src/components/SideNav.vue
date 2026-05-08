@@ -8,6 +8,7 @@ const navItems = [
   { name: 'graph', label: '知识图谱', icon: '🔗' },
   { name: 'search', label: '搜索', icon: '🔍' },
   { name: 'feed', label: '推荐', icon: '✨' },
+  { name: 'timeline', label: '时间线', icon: '📜' },
   { name: 'insights', label: '洞察', icon: '💡' },
   { name: 'settings', label: '设置', icon: '⚙️' },
 ]
