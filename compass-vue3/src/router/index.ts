@@ -11,6 +11,11 @@ const routes = [
     component: () => import('@/views/entities/EntityListView.vue'),
   },
   {
+    path: '/entities/:id',
+    name: 'entity',
+    component: () => import('@/views/entities/EntityDetailView.vue'),
+  },
+  {
     path: '/graph',
     name: 'graph',
     component: () => import('@/views/graph/GraphView.vue'),
