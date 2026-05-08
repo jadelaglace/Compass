@@ -1,5 +1,6 @@
 """REST endpoints for entity management."""
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
@@ -9,6 +10,73 @@ from pydantic import BaseModel, Field
 from src import config
 from src.db.database import Database, get_db
 from src.core.rust_client import rust_client
+
+# ---- Auto-tag extraction ----
+
+# Bilingual stopwords: English + Chinese common words
+_STOPWORDS: frozenset[str] = frozenset({
+    # English
+    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might",
+    "must", "shall", "can", "need", "this", "that", "these", "those",
+    "it", "its", "with", "from", "by", "as", "into", "through", "during",
+    "before", "after", "above", "below", "between", "under", "again",
+    "further", "then", "once", "here", "there", "when", "where", "why",
+    "how", "all", "each", "few", "more", "most", "other", "some", "such",
+    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+    # Chinese
+    "的", "是", "在", "了", "和", "与", "或", "以及", "之", "于", "为",
+    "以", "因", "从", "到", "由", "对", "而", "则", "但", "却", "所以",
+    "因为", "如果", "虽然", "然而", "不过", "只是", "就是", "而且", "或者",
+    "这", "那", "这里", "那里", "这个", "那个", "自己", "什么", "怎么",
+    "如何", "何时", "何地", "为何", "多少", "几个", "一个", "一些",
+    # Symbols to discard
+    "_", "-", "/", "\\", ":", ".", ",", ";", "!", "?", "'", "\"",
+    "（", "）", "（", "）", "【", "】", "[", "]", "{", "}",
+})
+
+
+def _extract_tags(title: str) -> list[str]:
+    """Extract 1-5 tags from an entity title.
+
+    Algorithm:
+    1. Tokenise on camelCase, underscores, spaces, dashes, dots
+    2. Filter stopwords (EN/ZH/symbols), single-char tokens, pure numbers
+    3. Count word frequency (case-insensitive)
+    4. Return Top 3 as `#lowercase_underscore` tags
+
+    Returns empty list if no useful tags found.
+    """
+    # Tokenise
+    tokens: list[str] = []
+    # Split on: space, underscore, dash, dot, camelCase boundary, Chinese chars
+    raw_tokens = re.split(r'[\s_\-\./\\]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', title)
+    for raw in raw_tokens:
+        # Strip Chinese punctuation
+        raw = re.sub(r'[\u2000-\u206f\u3000-\u303f\uff00-\uffef，。！？；：、""''（）【】《》]', '', raw)
+        if raw:
+            tokens.append(raw.strip())
+
+    # Lowercase + filter
+    filtered: list[str] = []
+    for tok in tokens:
+        tok_lower = tok.lower()
+        if (
+            len(tok_lower) < 2
+            or tok_lower in _STOPWORDS
+            or tok_lower.isdigit()
+            or re.fullmatch(r'[0-9]+', tok_lower)
+        ):
+            continue
+        filtered.append(tok_lower)
+
+    if not filtered:
+        return []
+
+    # Top-3 by frequency
+    top = Counter(filtered).most_common(3)
+    return [f"#{word}" for word, _ in top]
 
 # Reference strength patterns — computed from link text / context
 # Ordered: first match wins
@@ -57,6 +125,90 @@ def _calc_ref_strength(link_text: str) -> float:
         if pattern.search(link_text):
             return strength
     return 1.0
+
+
+# ---- Maturity state machine (with configurable evolution rules) ----
+
+from typing import Any  # re-imported here to avoid circular issues with quote annotations
+
+# Default evolution rules when no per-category rule exists
+_DEFAULT_UPGRADE: dict[str, dict[str, Any]] = {
+    "seedling": {"access_count": 5, "min_score": 5.0},
+    "growing": {"access_count": 15, "min_score": 6.5},
+}
+
+_DEFAULT_DOWNGRADE: dict[str, dict[str, int]] = {
+    "seedling": {"days": 30},
+    "growing": {"days": 60},
+    "mature": {"days": 120},
+}
+
+
+async def _get_evolution_rule(db: "Database", category: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Get evolution rule for a category, falling back to defaults."""
+    rule = await db.get_evolution_rule(category)
+    if rule:
+        return rule["upgrade_conditions"], rule["downgrade_conditions"]
+    return _DEFAULT_UPGRADE, _DEFAULT_DOWNGRADE
+
+
+def _apply_maturity_transition(
+    maturity: str,
+    upgrade_conds: dict[str, Any],
+    downgrade_conds: dict[str, Any],
+    access_count: int,
+    final_score: float,
+    last_boosted_at: Optional[str],
+) -> Optional[str]:
+    """Evaluate upgrade/downgrade rules and return new maturity or None.
+
+    Downgrade takes precedence over upgrade if both could apply.
+    """
+    new_maturity: Optional[str] = None
+
+    # --- Check upgrade ---
+    upgrade = upgrade_conds.get(maturity)
+    if upgrade and access_count >= upgrade.get("access_count", 0) and final_score >= upgrade.get("min_score", 0.0):
+        if maturity == "seedling":
+            new_maturity = "growing"
+        elif maturity == "growing":
+            new_maturity = "mature"
+
+    # --- Check downgrade (overrides upgrade if applicable) ---
+    downgrade = downgrade_conds.get(maturity)
+    if downgrade and last_boosted_at:
+        try:
+            last_dt = datetime.fromisoformat(last_boosted_at.replace("Z", "+00:00"))
+            days_idle = (datetime.now(tz=timezone.utc) - last_dt).days
+            if days_idle >= downgrade.get("days", 0):
+                new_maturity = "seedling"  # all states degrade to seedling
+        except Exception:
+            pass
+
+    if new_maturity and new_maturity != maturity:
+        return new_maturity
+    return None
+
+
+async def _check_and_update_maturity(
+    entity_id: str,
+    maturity: str,
+    category: str,
+    access_count: int,
+    final_score: float,
+    last_boosted_at: Optional[str],
+    db: "Database",
+) -> Optional[str]:
+    """Check and apply maturity state transition using per-category evolution rules.
+
+    Returns the new maturity if changed, else None.
+    Caller must manage transaction around this call."""
+    upgrade_conds, downgrade_conds = await _get_evolution_rule(db, category)
+    return _apply_maturity_transition(
+        maturity, upgrade_conds, downgrade_conds,
+        access_count, final_score, last_boosted_at,
+    )
+
 
 # ---- entity ID normalization (mirrors FileWatcher's vault_path_to_entity_id) ----
 
@@ -145,6 +297,7 @@ class EntityResponse(BaseModel):
     category: str
     vault_path: str
     final_score: float
+    tags: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
 
@@ -173,7 +326,7 @@ class EntityListResponse(BaseModel):
 
 @router.post("", response_model=EntityResponse)
 async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(get_db)] = None) -> EntityResponse:
-    """Create a new entity with computed score and extracted refs."""
+    """Create a new entity with computed score, extracted refs, and auto-tags."""
     now = datetime.now(tz=timezone.utc).isoformat()
     vault_path = entity.vault_path
     file_path = entity.file_path or str(config.VAULT_PATH / vault_path)
@@ -203,12 +356,25 @@ async def create_entity(entity: EntityCreate, db: Annotated[Database, Depends(ge
         event_trigger="api",
     )
 
+    # Auto-tag extraction: derive up to 3 tags from title
+    tags = _extract_tags(entity.title)
+    if tags:
+        await db.begin()
+        try:
+            for tag in tags:
+                await db.upsert_tagging(entity.id, tag)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
     return EntityResponse(
         id=entity.id,
         title=entity.title,
         category=entity.category,
         vault_path=vault_path,
         final_score=score_data["final_score"],
+        tags=tags,
         created_at=now,
         updated_at=now,
     )
@@ -273,7 +439,6 @@ async def list_entities(
     )
 
 
-@router.put("/{entity_id}", response_model=EntityResponse)
 # ---- Timeline-2: GET /entities/timeline ----
 
 class TimelineItem(BaseModel):
@@ -386,6 +551,7 @@ async def get_entities_timeline(
     ]
     has_more = (offset + limit) < total
     return TimelineResponse(items=items, total=total, has_more=has_more)
+@router.put("/{entity_id}", response_model=EntityResponse)
 async def update_entity(
     entity_id: str,
     update: EntityCreate,
@@ -488,6 +654,9 @@ async def delete_entity(entity_id: str, db: Annotated[Database, Depends(get_db)]
         await db.conn.execute('DELETE FROM "references" WHERE source_id = ? OR target_id = ?', (entity_id, entity_id))
         await db.conn.execute("DELETE FROM timeline_events WHERE entity_id = ?", (entity_id,))
         await db.conn.execute("DELETE FROM scores WHERE entity_id = ?", (entity_id,))
+        await db.conn.execute("DELETE FROM taggings WHERE entity_id = ?", (entity_id,))
+        await db.conn.execute("DELETE FROM score_history WHERE entity_id = ?", (entity_id,))
+        await db.conn.execute("DELETE FROM insights WHERE entity_id = ?", (entity_id,))
         await db.conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
         await db.commit()
     except Exception:
@@ -499,12 +668,16 @@ async def delete_entity(entity_id: str, db: Annotated[Database, Depends(get_db)]
 
 @router.get("/{entity_id}")
 async def get_entity(entity_id: str, db: Annotated[Database, Depends(get_db)] = None) -> dict:
-    """Fetch a single entity by ID with its incoming and outgoing references."""
+    """Fetch a single entity by ID with its incoming and outgoing references and tags."""
     entity = await db.get_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     out_refs, in_refs = await db.get_references(entity_id)
-    return {**entity, "outgoing_refs": out_refs, "incoming_refs": in_refs}
+    async with db.conn.execute(
+        "SELECT tag FROM taggings WHERE entity_id = ?", (entity_id,)
+    ) as cur:
+        tags = [row[0] for row in await cur.fetchall()]
+    return {**entity, "outgoing_refs": out_refs, "incoming_refs": in_refs, "tags": tags}
 
 
 # ---- Score History endpoint (History-2) ----
@@ -651,6 +824,32 @@ async def record_access(
         await db.rollback()
         raise
 
+    # ---- Maturity state machine check (after successful access record) ----
+    # Re-read current entity state (committed values)
+    updated_entity = await db.get_entity(entity_id)
+    if updated_entity:
+        current_maturity = updated_entity.get("maturity", "seedling")
+        maturity_locked = bool(updated_entity.get("maturity_locked"))
+        if not maturity_locked:
+            new_mat = await _check_and_update_maturity(
+                entity_id=entity_id,
+                maturity=current_maturity,
+                category=updated_entity.get("category", "Inbox"),
+                access_count=new_count,
+                final_score=new_final,
+                last_boosted_at=now_str,
+                db=db,
+            )
+            if new_mat:
+                await db.begin()
+                try:
+                    await db.update_entity_maturity(entity_id, new_mat)
+                    await db.log_event(entity_id, "maturity_changed", trigger="auto", extra={"new_maturity": new_mat})
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    raise
+
     return AccessResponse(
         entity_id=entity_id,
         access_count=new_count,
@@ -713,3 +912,244 @@ async def get_entity_timeline(
         for row in rows
     ]
     return EntityTimelineResponse(entity_id=entity_id, items=items, total=total)
+
+
+# ---- P3-AutoRelate-1: GET /entities/{id}/related ----
+
+class RelatedEntityItem(BaseModel):
+    id: str
+    title: str
+    entity_type: str
+    category: str
+    vault_path: str
+    final_score: Optional[float]
+    related_score: float
+    tags: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class RelatedResponse(BaseModel):
+    entity_id: str
+    items: list[RelatedEntityItem]
+    count: int
+
+
+@router.get("/{entity_id}/related")
+async def get_related_entities(
+    entity_id: str,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> RelatedResponse:
+    """Return hybrid-scored related entities for an entity.
+
+    Hybrid scoring (0.4 + 0.3 + 0.3 = 1.0 max):
+    - Content similarity: FTS5 same-category title match (weight 0.4)
+    - Tag co-occurrence: shared tags > 2 (weight 0.3)
+    - Graph proximity: 2 hops, strength > 0.5 (weight 0.3)
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    items = await db.get_related_entities(entity_id, limit=limit)
+    return RelatedResponse(
+        entity_id=entity_id,
+        items=[RelatedEntityItem(**item) for item in items],
+        count=len(items),
+    )
+
+
+# ---- P3-AutoTag-2: tag recommendation + batch tag update ----
+
+class TagRecommendationItem(BaseModel):
+    tag: str
+    score: int
+
+
+class TagRecommendResponse(BaseModel):
+    entity_id: str
+    recommendations: list[TagRecommendationItem]
+    count: int
+
+
+class TagUpdateRequest(BaseModel):
+    tags: list[str] = Field(description="Complete list of tags to set (replaces existing)")
+
+
+@router.post("/{entity_id}/tags/recommend")
+async def recommend_tags(
+    entity_id: str,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> TagRecommendResponse:
+    """Recommend candidate tags for an entity based on co-occurrence analysis and FTS similarity.
+
+    Algorithm:
+    1. Co-occurrence: find entities sharing >2 tags, collect their other tags (Top 10 by frequency)
+    2. FTS fallback: same-category entities with similar titles, borrow their tags as candidates
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    recs = await db.get_tag_recommendations(entity_id, limit=limit)
+    return TagRecommendResponse(
+        entity_id=entity_id,
+        recommendations=[TagRecommendationItem(**r) for r in recs],
+        count=len(recs),
+    )
+
+
+@router.put("/{entity_id}/tags")
+async def update_tags(
+    entity_id: str,
+    update: TagUpdateRequest,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """Replace all tags for an entity with the provided list."""
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    await db.begin()
+    try:
+        await db.set_entity_tags(entity_id, update.tags)
+        await db.log_event(entity_id, "tags_updated", trigger="api", extra={"tags": update.tags})
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"entity_id": entity_id, "tags": update.tags}
+
+
+# ---- P3-Maturity-2: Manual maturity lock/update endpoint ----
+
+class MaturityUpdate(BaseModel):
+    locked: Optional[bool] = None
+    maturity: Optional[str] = None  # e.g. "seedling", "growing", "mature"
+
+
+@router.patch("/{entity_id}/maturity")
+async def update_maturity(
+    entity_id: str,
+    update: MaturityUpdate,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> dict:
+    """Set maturity_locked flag and/or force a specific maturity level.
+
+    - locked=True → prevent auto-evolution for this entity
+    - maturity=X  → directly set maturity (used with or without locked)
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    await db.begin()
+    try:
+        if update.locked is not None:
+            await db.set_entity_maturity_lock(entity_id, update.locked)
+            await db.log_event(
+                entity_id,
+                "maturity_locked" if update.locked else "maturity_unlocked",
+                trigger="api",
+            )
+        if update.maturity is not None:
+            await db.update_entity_maturity(entity_id, update.maturity)
+            await db.log_event(
+                entity_id,
+                "maturity_changed",
+                trigger="manual",
+                extra={"new_maturity": update.maturity},
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    return {
+        "entity_id": entity_id,
+        "maturity": update.maturity or entity.get("maturity"),
+        "maturity_locked": update.locked if update.locked is not None else bool(entity.get("maturity_locked")),
+    }
+
+
+# ---- P3-AutoRelate-2: Auto-create bidirectional reference edges ----
+
+class RelateRequest(BaseModel):
+    limit: int = Field(default=10, ge=1, le=50)
+    strength: float = Field(default=1.0, ge=0.0, le=2.0)
+    dry_run: bool = Field(default=False, description="If true, return what would be created without creating")
+
+
+class RelateResponse(BaseModel):
+    entity_id: str
+    created: list[dict]
+    skipped: list[dict]
+    total_created: int
+    total_skipped: int
+
+
+@router.post("/{entity_id}/relate", response_model=RelateResponse)
+async def auto_relate_entities(
+    entity_id: str,
+    request: RelateRequest,
+    db: Annotated[Database, Depends(get_db)] = None,
+) -> RelateResponse:
+    """Automatically create bidirectional reference edges to related entities.
+
+    Uses P3-AutoRelate-1's hybrid scoring to find top related entities,
+    then creates bidirectional edges: source→target (strength) and
+    target→source (strength*0.5).
+
+    Idempotent: if edge already exists, it's skipped (not duplicated).
+    """
+    entity = await db.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    related = await db.get_related_entities(entity_id, limit=request.limit)
+
+    created: list[dict] = []
+    skipped: list[dict] = []
+
+    for rel in related:
+        rel_id = rel["id"]
+        forward = (entity_id, rel_id, request.strength)
+        reverse = (rel_id, entity_id, round(request.strength * 0.5, 2))
+
+        # Check if forward edge already exists
+        async with db.conn.execute(
+            'SELECT 1 FROM "references" WHERE source_id = ? AND target_id = ?',
+            (entity_id, rel_id),
+        ) as cur:
+            exists = await cur.fetchone()
+
+        if exists:
+            skipped.append({"target_id": rel_id, "reason": "edge_exists"})
+            continue
+
+        if not request.dry_run:
+            await db.upsert_reference(entity_id, rel_id, request.strength)
+
+        created.append({
+            "source_id": entity_id,
+            "target_id": rel_id,
+            "strength": request.strength,
+        })
+        created.append({
+            "source_id": rel_id,
+            "target_id": entity_id,
+            "strength": reverse[2],
+        })
+
+    if created and not request.dry_run:
+        await db.log_event(entity_id, "related", trigger="auto", extra={
+            "created": len(created) // 2,
+            "targets": [rel["id"] for rel in related],
+        })
+
+    return RelateResponse(
+        entity_id=entity_id,
+        created=created,
+        skipped=skipped,
+        total_created=len(created) // 2,
+        total_skipped=len(skipped),
+    )

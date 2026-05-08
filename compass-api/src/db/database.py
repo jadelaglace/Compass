@@ -122,16 +122,102 @@ class Database:
 
     # ---- entities ----
 
+    async def update_entity_maturity(self, entity_id: str, new_maturity: str) -> None:
+        """Update entity maturity and append to maturity_history.
+
+        Caller manages transaction."""
+        now = datetime.now(tz=timezone.utc).isoformat()
+        async with self.conn.execute(
+            "SELECT maturity, maturity_history FROM entities WHERE id = ?", (entity_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        history = json.loads(row["maturity_history"] or "[]")
+        history.append({"from": row["maturity"], "to": new_maturity, "at": now})
+        await self.conn.execute(
+            "UPDATE entities SET maturity = ?, maturity_history = ? WHERE id = ?",
+            (new_maturity, json.dumps(history), entity_id),
+        )
+
+    async def set_entity_maturity_lock(self, entity_id: str, locked: bool) -> None:
+        """Set the maturity_locked flag on an entity. Caller manages transaction."""
+        await self.conn.execute(
+            "UPDATE entities SET maturity_locked = ? WHERE id = ?",
+            (int(locked), entity_id),
+        )
+
+    async def upsert_evolution_rule(self, data: dict[str, Any]) -> None:
+        """Insert or update an evolution rule. Caller manages transaction."""
+        await self.conn.execute(
+            """
+            INSERT INTO evolution_rules (id, category, upgrade_conditions, downgrade_conditions, locked, created_at, updated_at)
+            VALUES (:id, :category, :upgrade_conditions, :downgrade_conditions, :locked, :created_at, :updated_at)
+            ON CONFLICT(id) DO UPDATE SET
+                category = excluded.category,
+                upgrade_conditions = excluded.upgrade_conditions,
+                downgrade_conditions = excluded.downgrade_conditions,
+                locked = excluded.locked,
+                updated_at = excluded.updated_at
+            """,
+            {
+                "id": data["id"],
+                "category": data["category"],
+                "upgrade_conditions": json.dumps(data.get("upgrade_conditions", {})),
+                "downgrade_conditions": json.dumps(data.get("downgrade_conditions", {})),
+                "locked": int(data.get("locked", False)),
+                "created_at": data.get("created_at", datetime.now(tz=timezone.utc).isoformat()),
+                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+        )
+
+    async def get_evolution_rule(self, category: str) -> Optional[dict[str, Any]]:
+        """Fetch an evolution rule by category, or None if not found."""
+        async with self.conn.execute(
+            "SELECT * FROM evolution_rules WHERE category = ?", (category,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        # Deserialize JSON fields
+        result["upgrade_conditions"] = json.loads(result.get("upgrade_conditions") or "{}")
+        result["downgrade_conditions"] = json.loads(result.get("downgrade_conditions") or "{}")
+        result["locked"] = bool(result["locked"])
+        return result
+
+    async def get_all_evolution_rules(self) -> list[dict[str, Any]]:
+        """Return all evolution rules."""
+        async with self.conn.execute("SELECT * FROM evolution_rules ORDER BY category") as cur:
+            rows = await cur.fetchall()
+        results = []
+        for row in rows:
+            result = dict(row)
+            result["upgrade_conditions"] = json.loads(result.get("upgrade_conditions") or "{}")
+            result["downgrade_conditions"] = json.loads(result.get("downgrade_conditions") or "{}")
+            result["locked"] = bool(result["locked"])
+            results.append(result)
+        return results
+
+    async def delete_evolution_rule(self, category: str) -> bool:
+        """Delete an evolution rule by category. Returns True if deleted, False if not found."""
+        cursor = await self.conn.execute(
+            "DELETE FROM evolution_rules WHERE category = ?", (category,)
+        )
+        return cursor.rowcount > 0
+
     async def upsert_entity(self, data: dict[str, Any]) -> None:
         """Insert or update an entity. Caller manages transaction."""
         await self.conn.execute(
             """
             INSERT INTO entities (id, file_path, vault_path, title, category,
                                    created_at, updated_at, last_boosted_at,
-                                   has_attachments, attachment_refs, metadata)
+                                   has_attachments, attachment_refs, metadata,
+                                   maturity, maturity_locked)
             VALUES (:id, :file_path, :vault_path, :title, :category,
                     :created_at, :updated_at, :last_boosted_at,
-                    :has_attachments, :attachment_refs, :metadata)
+                    :has_attachments, :attachment_refs, :metadata,
+                    :maturity, :maturity_locked)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 category = excluded.category,
@@ -139,7 +225,9 @@ class Database:
                 last_boosted_at = excluded.last_boosted_at,
                 has_attachments = excluded.has_attachments,
                 attachment_refs = excluded.attachment_refs,
-                metadata = excluded.metadata
+                metadata = excluded.metadata,
+                maturity = excluded.maturity,
+                maturity_locked = excluded.maturity_locked
             """,
             {
                 "id": data["id"],
@@ -153,6 +241,8 @@ class Database:
                 "has_attachments": int(data.get("has_attachments", False)),
                 "attachment_refs": json.dumps(data.get("attachment_refs", [])),
                 "metadata": json.dumps(data.get("metadata", {})),
+                "maturity": data.get("maturity", "seedling"),
+                "maturity_locked": int(data.get("maturity_locked", False)),
             },
         )
         # NOTE: no commit() here — caller controls transaction
@@ -224,6 +314,13 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
+
+    async def upsert_tagging(self, entity_id: str, tag: str) -> None:
+        """Insert a tagging association. Does nothing if already exists (UNIQUE constraint)."""
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO taggings (entity_id, tag) VALUES (?, ?)",
+            (entity_id, tag),
+        )
 
     async def upsert_insight(self, data: dict[str, Any]) -> None:
         """Insert or update an insight. Caller manages transaction."""
@@ -494,6 +591,198 @@ class Database:
             [r["target_id"] for r in out_rows],
             [r["source_id"] for r in in_rows],
         )
+
+    async def get_related_entities(self, entity_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Hybrid related-entity recommendation for an entity.
+
+        Combines:
+        - Content similarity (FTS5, same category): weight 0.4
+        - Tag co-occurrence (shared tags > 2): weight 0.3
+        - Graph proximity (2 hops, strength > 0.5): weight 0.3
+        """
+        entity = await self.get_entity(entity_id)
+        if not entity:
+            return []
+
+        scores: dict[str, float] = {}
+
+        # 1. Content similarity via FTS5 (same category, top 5)
+        async with self.conn.execute(
+            """
+            SELECT e.id, e.title, e.category, s.final_score
+            FROM entities_fts f
+            JOIN entities e ON e.id = f.id
+            LEFT JOIN scores s ON s.entity_id = e.id
+            WHERE entities_fts MATCH ? AND e.category = ? AND e.id != ?
+            ORDER BY rank
+            LIMIT 5
+            """,
+            (entity["title"], entity["category"], entity_id),
+        ) as cur:
+            for row in await cur.fetchall():
+                rid = row["id"]
+                scores[rid] = scores.get(rid, 0) + 0.4
+
+        # 2. Tag co-occurrence (shared tags > 2)
+        async with self.conn.execute(
+            """
+            SELECT t1.entity_id AS other_id, COUNT(*) AS shared_tags
+            FROM taggings t1
+            JOIN taggings t2 ON t1.tag = t2.tag AND t2.entity_id = ?
+            WHERE t1.entity_id != ?
+            GROUP BY t1.entity_id
+            HAVING shared_tags > 2
+            LIMIT 10
+            """,
+            (entity_id, entity_id),
+        ) as cur:
+            for row in await cur.fetchall():
+                rid = row["other_id"]
+                # Normalize: tag count 3→0.3, 4→0.4, etc. capped at 1.0
+                tag_score = min(row["shared_tags"] * 0.1, 1.0)
+                scores[rid] = scores.get(rid, 0) + 0.3 * tag_score
+
+        # 3. Graph proximity (2 hops, strength > 0.5)
+        async with self.conn.execute(
+            """
+            WITH one_hop AS (
+                SELECT target_id FROM "references" WHERE source_id = ? AND strength > 0.5
+            ),
+            two_hop AS (
+                SELECT r.target_id
+                FROM "references" r
+                JOIN one_hop h ON r.source_id = h.target_id
+                WHERE r.target_id != ? AND r.strength > 0.5
+            )
+            SELECT DISTINCT target_id FROM two_hop LIMIT 10
+            """,
+            (entity_id, entity_id),
+        ) as cur:
+            for row in await cur.fetchall():
+                rid = row["target_id"]
+                scores[rid] = scores.get(rid, 0) + 0.3
+
+        if not scores:
+            return []
+
+        # Sort by combined score, fetch entity details
+        sorted_ids = sorted(scores, key=lambda x: scores[x], reverse=True)[:limit]
+        placeholders = ",".join("?" * len(sorted_ids))
+        async with self.conn.execute(
+            f"""
+            SELECT e.id, e.title, e.entity_type, e.category, e.vault_path,
+                   s.final_score, e.created_at, e.updated_at
+            FROM entities e
+            LEFT JOIN scores s ON s.entity_id = e.id
+            WHERE e.id IN ({placeholders})
+            """,
+            sorted_ids,
+        ) as cur:
+            rows = await cur.fetchall()
+
+        items = []
+        item_map: dict[str, dict] = {}
+        for row in rows:
+            item = dict(row)
+            item["related_score"] = round(scores.get(item["id"], 0), 3)
+            item["tags"] = []  # will be filled by batch query
+            items.append(item)
+            item_map[item["id"]] = item
+
+        # Batch-fetch all tags for related entities at once
+        if sorted_ids:
+            placeholders = ",".join("?" * len(sorted_ids))
+            async with self.conn.execute(
+                f"SELECT entity_id, tag FROM taggings WHERE entity_id IN ({placeholders})",
+                sorted_ids,
+            ) as tag_cur:
+                for row in await tag_cur.fetchall():
+                    eid = row["entity_id"]
+                    if eid in item_map:
+                        item_map[eid]["tags"].append(row["tag"])
+
+        items.sort(key=lambda x: x["related_score"], reverse=True)
+        return items
+
+
+    async def get_tag_recommendations(self, entity_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Recommend candidate tags for an entity based on co-occurrence and FTS similarity.
+
+        Algorithm:
+        1. Co-occurrence: find entities sharing >2 tags, collect their other tags
+        2. FTS fallback: same-category similar entities, borrow their tags
+        Returns Top 10 tags sorted by co-occurrence frequency.
+        """
+        entity = await self.get_entity(entity_id)
+        if not entity:
+            return []
+
+        candidate_tags: dict[str, int] = {}  # tag -> co-occurrence count
+
+        # Get current entity's tags
+        async with self.conn.execute(
+            "SELECT tag FROM taggings WHERE entity_id = ?", (entity_id,)
+        ) as cur:
+            my_tags = {row[0] for row in await cur.fetchall()}
+
+        if my_tags:
+            # Co-occurrence: find other entities sharing tags, collect their other tags
+            tag_list = list(my_tags)
+            placeholders = ",".join("?" * len(tag_list))
+            async with self.conn.execute(
+                f"""
+                SELECT t1.tag, COUNT(DISTINCT t1.entity_id) AS cnt
+                FROM taggings t1
+                JOIN taggings t2 ON t1.tag = t2.tag AND t2.entity_id = ?
+                WHERE t1.entity_id != ?
+                GROUP BY t1.tag
+                HAVING cnt > 2
+                ORDER BY cnt DESC
+                LIMIT ?
+                """,
+                [entity_id, entity_id, limit],
+            ) as cur:
+                for row in await cur.fetchall():
+                    candidate_tags[row["tag"]] = row["cnt"]
+
+        # If fewer than limit candidates, supplement with FTS same-category entities' tags
+        if len(candidate_tags) < limit:
+            async with self.conn.execute(
+                """
+                SELECT e.id
+                FROM entities_fts f
+                JOIN entities e ON e.id = f.id
+                WHERE entities_fts MATCH ? AND e.category = ? AND e.id != ?
+                ORDER BY rank
+                LIMIT 5
+                """,
+                (entity["title"], entity["category"], entity_id),
+            ) as cur:
+                similar_rows = await cur.fetchall()
+
+            for row in similar_rows:
+                async with self.conn.execute(
+                    "SELECT tag FROM taggings WHERE entity_id = ?", (row["id"],)
+                ) as tag_cur:
+                    for tag_row in await tag_cur.fetchall():
+                        tag = tag_row[0]
+                        if tag not in my_tags:
+                            candidate_tags[tag] = candidate_tags.get(tag, 0) + 1
+
+        # Sort by count descending, take top limit
+        sorted_tags = sorted(candidate_tags.items(), key=lambda x: x[1], reverse=True)[:limit]
+        return [{"tag": tag, "score": count} for tag, count in sorted_tags]
+
+    async def set_entity_tags(self, entity_id: str, tags: list[str]) -> None:
+        """Replace all tags for an entity with the given list.
+
+        Caller manages transaction."""
+        await self.conn.execute("DELETE FROM taggings WHERE entity_id = ?", (entity_id,))
+        for tag in tags:
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO taggings (entity_id, tag) VALUES (?, ?)",
+                (entity_id, tag),
+            )
 
 
 # ---- FastAPI dependency ----
