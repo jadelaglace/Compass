@@ -29,7 +29,8 @@
 | v1.0-B | 2026-04-03 | PCOS 8周MVP详细分解 |
 | v2.0 | 2026-04-17 | Phase 2功能分档（Easy/Medium/Hard/Very Hard） |
 | v2.1 | 2026-04-20 | 整合A/B版本完整规格，填补v2.0技术缺口 |
-| **v2.2** | 2026-04-27 | 恢复阉割功能：前端TS锁定（Vue3+TS）、飞书Bot交互架构（修正）、FAISS搜索、定时任务、备份策略、PWA离线；MCP Server列入Phase 3（非核心） |
+| v2.2 | 2026-04-27 | 恢复阉割功能：前端TS锁定、飞书Bot交互架构、FAISS搜索、定时任务、备份策略、PWA离线；MCP Server列入Phase 3（非核心） |
+| **v2.3** | 2026-05-08 | Phase 3 自动能力（AutoTag/Maturity/AutoRelate）全部完成并入 dev；前端与可视化移至 Phase 4，部署工程化移至 Phase 5；后续相位顺延 |
 
 ### 1.2 v2.0 → v2.1 关键增补
 
@@ -1358,57 +1359,37 @@ networks:
 
 **Phase 2 总工时：130h（6-8 周）**
 
-### 14.3 Phase 3：前端（Vue3 + TypeScript）
+### 14.3 Phase 3 · 自动能力增强 ✅（已完成）
 
-**目标：** Web UI 呈现 Phase 1/2 后端能力。
+**完成时间：** 2026-05-06  
+**目标：** Schema 已支持 tags/maturity/references，但无自动填充/演化机制。Phase 3 补全这条"自动闭环"。
 
-> **⚠️ 技术栈锁定：Vue3 + TypeScript + Vite + D3.js（TS 不可替换）**
+| 任务 ID | 任务名称 | 状态 | PR |
+|---------|----------|------|-----|
+| P3-AutoTag-1 | 自动标签提取（创建时） | ✅ | PR #107 |
+| P3-AutoTag-2 | 标签智能推荐 + 批量更新 | ✅ | PR #111 |
+| P3-Maturity-1 | Entity maturity 状态机 | ✅ | PR #108 |
+| P3-Maturity-2 | 可配置演化规则引擎 | ✅ | PR #114 |
+| P3-AutoRelate-1 | 实体相似度关联推荐 | ✅ | PR #109 |
+| P3-AutoRelate-2 | 自动建立双向引用边 | ✅ | PR #114 |
 
-| 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 工时 |
-|---------|----------|------|--------|------|------|
-| P3-UI-1 | Vue3 + TypeScript + Vite 骨架 | `feat/p3-ui-1-skeleton` | P0 | P2-Search-1 | 8h |
-| P3-UI-2 | 实体列表页（分页+过滤+搜索） | `feat/p3-ui-2-entity-list` | P0 | P3-UI-1 | 6h |
-| P3-UI-3 | 实体详情页（Markdown渲染+引用） | `feat/p3-ui-3-entity-detail` | P0 | P3-UI-1 | 8h |
-| P3-UI-4 | 评分面板（三维雷达图+历史曲线） | `feat/p3-ui-4-score-panel` | P1 | P3-UI-1 | 6h |
-| P3-UI-5 | 图谱可视化（D3.js Force-Directed） | `feat/p3-ui-5-graph-viz` | P1 | P2-Graph-1 | 12h |
-| P3-UI-6 | Feed 信息流页面 | `feat/p3-ui-6-feed` | P1 | P2-Search-1 | 4h |
-| P3-UI-7 | 搜索页面（语义搜索+高亮） | `feat/p3-ui-7-search` | P1 | P2-Search-1 | 6h |
-| P3-UI-8 | 时间线页面 | `feat/p3-ui-8-timeline` | P2 | P2-Timeline-2 | 4h |
-| P3-UI-9 | Insight 页面（成熟度状态机） | `feat/p3-ui-9-insight` | P2 | P2-Insight-2 | 6h |
-| P3-UI-10 | 用户设置页（权重+Decay配置） | `feat/p3-ui-10-settings` | P2 | P3-UI-1 | 4h |
-| P3-PWA-1 | PWA 配置（SW + Manifest） | `feat/p3-pwa-1` | P2 | P3-UI-1 | 6h |
-| P3-PWA-2 | 离线缓存策略 | `feat/p3-pwa-2` | P2 | P3-PWA-1 | 6h |
-| P3-PWA-3 | 离线队列（评分/引用） | `feat/p3-pwa-3` | P2 | P3-PWA-2 | 4h |
-| P3-MCP-1 | MCP Server 基础（3 Tool） | `feat/p3-mcp-1-basic` | P2 | P2-Search-1 | 6h |
-| P3-MCP-2 | MCP Server 扩展至 15 Tool | `feat/p3-mcp-2-full` | P2 | P3-MCP-1 | 8h |
-| **P3-AutoTag-1** | 自动标签提取（创建时） | `feat/p3-auto-tag` | P1 | P2-Entity-1 | 4h |
-| **P3-AutoTag-2** | 标签智能推荐 | `feat/p3-auto-tag` | P2 | P3-AutoTag-1 | 3h |
-| **P3-Maturity-1** | Entity maturity 状态机 | `feat/p3-entity-maturity` | P1 | P2-Timeline-1 | 4h |
-| **P3-Maturity-2** | 自动演化规则引擎 | `feat/p3-entity-maturity` | P2 | P3-Maturity-1 | 6h |
-| **P3-AutoRelate-1** | 实体相似度关联推荐 | `feat/p3-auto-relate` | P1 | P2-Search-1 | 6h |
-| **P3-AutoRelate-2** | 自动建立双向引用边 | `feat/p3-auto-relate` | P2 | P3-AutoRelate-1 | 4h |
+**Phase 3 总工时：27h（实际完成）**
 
-**Phase 3 总工时：94h → 121h（4-6 周）**
-
-### 14.4 Phase 3 · 自动能力增强（新增）
-
-> **背景：** 当前 Schema 已支持 tags/maturity/references，但无自动填充/演化机制。Phase 3 补全这条"自动闭环"。
-
-#### 14.4.1 P3-AutoTag：自动标签
+#### P3-AutoTag：自动标签
 
 **目标：** 创建实体时自动从 title/content 提取标签，无需手动指定。
 
-| 任务 | 描述 | 依赖 |
+| 任务 | 描述 | 状态 |
 |------|------|------|
-| P3-AutoTag-1 | 创建实体时自动提取标签（TitleTokenizer，Top 3） | P2-Entity-1 |
-| P3-AutoTag-2 | 基于共现分析的标签智能推荐接口 | P3-AutoTag-1 |
+| P3-AutoTag-1 | 创建实体时自动提取标签（TitleTokenizer，Top 3） | ✅ |
+| P3-AutoTag-2 | 基于共现分析的标签智能推荐接口 | ✅ |
 
 **标签提取规则：**
 - `title` 分词 → 词性过滤（保留名词/动词）→ 取 Top 3
 - 格式：`#标签名`（英文小写，下划线连接）
 - 与手动传入的 `metadata.tags` 合并去重
 
-#### 14.4.2 P3-Maturity：实体成熟度自动演化
+#### P3-Maturity：实体成熟度自动演化
 
 **目标：** 实体 maturity 根据访问频率 + 评分自动升级/降级，形成知识生命周期管理。
 
@@ -1420,7 +1401,7 @@ networks:
 
 **触发时机：** `PATCH /entities/{id}/access` 时检查条件，满足则更新状态并记录 `timeline_events`。
 
-#### 14.4.3 P3-AutoRelate：自动关联推荐
+#### P3-AutoRelate：自动关联推荐
 
 **目标：** 基于内容相似度 + 标签共现 + 图谱距离，自动推荐关联实体并支持一键建联。
 
@@ -1431,28 +1412,54 @@ networks:
 
 **关联操作：** `POST /entities/{id}/relate` 批量建立双向引用边（反向 strength×0.5）。
 
-### 14.5 Phase 4：部署与工程化
+### 14.4 Phase 4 · 前端与可视化
+
+**目标：** Web UI 呈现 Phase 1/2/3 后端能力。
+
+> **⚠️ 技术栈锁定：Vue3 + TypeScript + Vite + D3.js（TS 不可替换）**
 
 | 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 工时 |
 |---------|----------|------|--------|------|------|
-| P4-Deploy-1 | docker-compose.yml | `feat/p4-deploy-1` | P0 | P3-UI-1 | 4h |
-| P4-Deploy-2 | Dockerfile | `feat/p4-deploy-2` | P0 | P4-Deploy-1 | 2h |
-| P4-Deploy-3 | 一键部署脚本 | `feat/p4-deploy-3` | P1 | P4-Deploy-1 | 3h |
-| P4-Deploy-4 | 环境变量规范 | `feat/p4-deploy-4` | P1 | P4-Deploy-1 | 1h |
-| P4-Monitor-1 | 健康检查增强 | `feat/p4-monitor-1` | P1 | P2-Search-1 | 3h |
-| P4-Monitor-2 | 监控面板 | `feat/p4-monitor-2` | P2 | P4-Monitor-1 | 6h |
-| P4-Migrate-1 | 数据迁移工具 | `feat/p4-migrate-1` | P3 | P2-Entity-1 | 12h |
-| P4-Migrate-2 | 导出工具 | `feat/p4-migrate-2` | P3 | P2-Entity-1 | 4h |
+| P4-UI-1 | Vue3 + TypeScript + Vite 骨架 | `feat/p4-ui-1-skeleton` | P0 | P2-Search-1 | 8h |
+| P4-UI-2 | 实体列表页（分页+过滤+搜索） | `feat/p4-ui-2-entity-list` | P0 | P4-UI-1 | 6h |
+| P4-UI-3 | 实体详情页（Markdown渲染+引用） | `feat/p4-ui-3-entity-detail` | P0 | P4-UI-1 | 8h |
+| P4-UI-4 | 评分面板（三维雷达图+历史曲线） | `feat/p4-ui-4-score-panel` | P1 | P4-UI-1 | 6h |
+| P4-UI-5 | 图谱可视化（D3.js Force-Directed） | `feat/p4-ui-5-graph-viz` | P1 | P2-Graph-1 | 12h |
+| P4-UI-6 | Feed 信息流页面 | `feat/p4-ui-6-feed` | P1 | P2-Search-1 | 4h |
+| P4-UI-7 | 搜索页面（语义搜索+高亮） | `feat/p4-ui-7-search` | P1 | P2-Search-1 | 6h |
+| P4-UI-8 | 时间线页面 | `feat/p4-ui-8-timeline` | P2 | P2-Timeline-2 | 4h |
+| P4-UI-9 | Insight 页面（成熟度状态机） | `feat/p4-ui-9-insight` | P2 | P2-Insight-2 | 6h |
+| P4-UI-10 | 用户设置页（权重+Decay配置） | `feat/p4-ui-10-settings` | P2 | P4-UI-1 | 4h |
+| P4-PWA-1 | PWA 配置（SW + Manifest） | `feat/p4-pwa-1` | P2 | P4-UI-1 | 6h |
+| P4-PWA-2 | 离线缓存策略 | `feat/p4-pwa-2` | P2 | P4-PWA-1 | 6h |
+| P4-PWA-3 | 离线队列（评分/引用） | `feat/p4-pwa-3` | P2 | P4-PWA-2 | 4h |
+| P4-MCP-1 | MCP Server 基础（3 Tool） | `feat/p4-mcp-1-basic` | P2 | P2-Search-1 | 6h |
+| P4-MCP-2 | MCP Server 扩展至 15 Tool | `feat/p4-mcp-2-full` | P2 | P4-MCP-1 | 8h |
+
+**Phase 4 前端总工时：84h（4-6 周）**
+
+### 14.5 Phase 5 · 部署与工程化
+
+| 任务 ID | 任务名称 | 分支 | 优先级 | 依赖 | 工时 |
+|---------|----------|------|--------|------|------|
+| P5-Deploy-1 | docker-compose.yml | `feat/p5-deploy-1` | P0 | P4-UI-1 | 4h |
+| P5-Deploy-2 | Dockerfile | `feat/p5-deploy-2` | P0 | P5-Deploy-1 | 2h |
+| P5-Deploy-3 | 一键部署脚本 | `feat/p5-deploy-3` | P1 | P5-Deploy-1 | 3h |
+| P5-Deploy-4 | 环境变量规范 | `feat/p5-deploy-4` | P1 | P5-Deploy-1 | 1h |
+| P5-Monitor-1 | 健康检查增强 | `feat/p5-monitor-1` | P1 | P2-Search-1 | 3h |
+| P5-Monitor-2 | 监控面板 | `feat/p5-monitor-2` | P2 | P5-Monitor-1 | 6h |
+| P5-Migrate-1 | 数据迁移工具 | `feat/p5-migrate-1` | P3 | P2-Entity-1 | 12h |
+| P5-Migrate-2 | 导出工具 | `feat/p5-migrate-2` | P3 | P2-Entity-1 | 4h |
 
 **Phase 4 总工时：35h（2-3 周）**
 
-### 14.5 完整路线图
+### 14.6 完整路线图
 
 ```
 Phase 1 ✅ (v0.1.0)
   └─ 核心引擎完成
 
-Phase 2 🔧 (116h，6-8 周)
+Phase 2 ✅ (v0.2.0, 2026-05-05)
   ├─ Graph API（P2-Graph-1~4）
   ├─ Fetch Pipeline（P2-Fetch-1~3）
   ├─ 语义搜索（P2-Search-1~2）
@@ -1463,7 +1470,10 @@ Phase 2 🔧 (116h，6-8 周)
   ├─ 备份系统（P2-Backup-1~3）
   └─ 定时任务（P2-Scheduler-1~4）
 
-Phase 3 🎨 (94h，4-6 周)
+Phase 3 ✅ (v0.3.0, 2026-05-06)
+  └─ 自动能力增强（AutoTag/Maturity/AutoRelate）全部完成
+
+Phase 4 🎨 (84h，4-6 周) — 待开发
   ├─ Vue3 + TypeScript 前端骨架
   ├─ 实体管理页面
   ├─ 评分面板 + 图谱可视化
@@ -1471,14 +1481,14 @@ Phase 3 🎨 (94h，4-6 周)
   ├─ PWA 离线能力
   └─ MCP Server（可选，按需）
 
-Phase 4 🚀 (35h，2-3 周)
+Phase 5 🚀 (35h，2-3 周) — 待开发
   ├─ docker-compose 部署
   ├─ 监控告警
   └─ 数据迁移工具
 
-总工时：245h | 建议周期：12-16 周 | **MCP Server：Phase 3 可选（非核心）**
+总工时：245h → 246h | 建议周期：12-16 周
 ```
 
 ---
 
-*文档版本：v2.2 | 更新日期：2026-04-27*
+*文档版本：v2.3 | 更新日期：2026-05-08*
