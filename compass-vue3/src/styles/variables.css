@@ -46,7 +46,15 @@
   --shadow-md: 0 4px 6px rgba(0,0,0,0.07);
   --shadow-lg: 0 10px 15px rgba(0,0,0,0.10);
 
-  /* Sidebar */
+  /* Score dimensions */
+  --color-interest:   #8b5cf6;
+  --color-strategy:   #06b6d4;
+  --color-consensus:  #f59e0b;
+  --color-composite:   #ec4899;
+  --accent: #6366f1;
+
+  /* Brand alias for convenience */
+  --color-primary: var(--color-brand);
   --sidebar-bg:   #1a1a2e;
   --sidebar-text: #e0e3ed;
   --sidebar-active-bg: #3a3a6a;
