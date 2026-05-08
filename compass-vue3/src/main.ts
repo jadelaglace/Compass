@@ -15,3 +15,13 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 app.mount('#app')
+
+// Register Service Worker (PWA)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').then(
+      registration => console.log('[SW] Registered:', registration.scope),
+      err => console.warn('[SW] Registration failed:', err)
+    )
+  })
+}
