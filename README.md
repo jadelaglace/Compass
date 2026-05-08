@@ -42,7 +42,7 @@
 
 | 文档 | 说明 |
 |------|------|
-| [docs/PRD_v2.md](docs/PRD_v2.md) | **产品需求文档 v2.2** — Phase 1-3 完整规划与状态 |
+| [docs/PRD_v2.1.md](docs/PRD_v2.1.md) | **产品需求文档 v2.3** — Phase 1-5 完整规划与状态 |
 | [docs/TDD.md](docs/TDD.md) | 测试驱动开发规范与测试地图 |
 | [OPENCLAW.md](OPENCLAW.md) | 架构决策 · 技术选型 · License |
 | [SKILL.md](SKILL.md) | OpenClaw Agent Skill 接口定义 |
@@ -99,7 +99,7 @@ Compass/
 | FastAPI | CRUD / query / feed / agent | ✅ |
 | OpenClaw Skill | 自然语言接口 | ✅ |
 
-### ✅ Phase 2 — 语义增强 (完成)
+### ✅ Phase 2 — 后端扩展 (完成)
 
 | 模块 | 功能 | PR |
 |------|------|-----|
@@ -126,6 +126,66 @@ Compass/
 | 演化规则引擎 | 可配置演化规则 | #114 |
 | 关联推荐 | 相似度混合打分 | #109 |
 | 自动关联 | 双向引用边自动创建 | #114 |
+
+### 🎨 Phase 4 — 前端与可视化 (待开发)
+
+| 模块 | 功能 | 依赖 |
+|------|------|------|
+| Vue3 骨架 | TypeScript + Vite + Pinia | — |
+| 实体列表页 | 分页 + 过滤 + 搜索 | P4-UI-1 |
+| 实体详情页 | Markdown 渲染 + 引用 | P4-UI-1 |
+| 评分面板 | 三维雷达图 + 历史曲线 | P4-UI-1 |
+| 图谱可视化 | D3.js Force-Directed | P2-Graph-1 |
+| Feed 信息流 | explore / consolidate / strategic | P2-Search-1 |
+| 搜索页面 | 语义搜索 + 高亮 | P2-Search-1 |
+| 时间线页面 | 访问 + 评分历史 | P2-Timeline-2 |
+| Insight 页面 | 成熟度状态机 | P2-Insight-2 |
+| 用户设置 | 权重 + Decay 配置 | P4-UI-1 |
+| PWA | SW + Manifest + 离线队列 | P4-UI-1 |
+| MCP Server | 3 Tool → 15 Tool | P2-Search-1 |
+
+**Phase 4 工时：84h（4-6 周）**
+
+### 🚀 Phase 5 — 部署与工程化 (待开发)
+
+| 模块 | 功能 | 依赖 |
+|------|------|------|
+| docker-compose | 一键部署 | P4-UI-1 |
+| Dockerfile | 容器化 | P5-Deploy-1 |
+| 监控面板 | 健康检查 + 指标 | P2-Search-1 |
+| 数据迁移 | 导入/导出工具 | P2-Entity-1 |
+
+**Phase 5 工时：35h（2-3 周）**
+
+### 🎨 Phase 4 — 前端与可视化 (待开发)
+
+| 模块 | 功能 | 依赖 |
+|------|------|------|
+| Vue3 骨架 | TypeScript + Vite + Pinia | — |
+| 实体列表页 | 分页 + 过滤 + 搜索 | P4-UI-1 |
+| 实体详情页 | Markdown 渲染 + 引用 | P4-UI-1 |
+| 评分面板 | 三维雷达图 + 历史曲线 | P4-UI-1 |
+| 图谱可视化 | D3.js Force-Directed | P2-Graph-1 |
+| Feed 信息流 | explore / consolidate / strategic | P2-Search-1 |
+| 搜索页面 | 语义搜索 + 高亮 | P2-Search-1 |
+| 时间线页面 | 访问 + 评分历史 | P2-Timeline-2 |
+| Insight 页面 | 成熟度状态机 | P2-Insight-2 |
+| 用户设置 | 权重 + Decay 配置 | P4-UI-1 |
+| PWA | SW + Manifest + 离线队列 | P4-UI-1 |
+| MCP Server | 3 Tool → 15 Tool | P2-Search-1 |
+
+**Phase 4 工时：84h（4-6 周）**
+
+### 🚀 Phase 5 — 部署与工程化 (待开发)
+
+| 模块 | 功能 | 依赖 |
+|------|------|------|
+| docker-compose | 一键部署 | P4-UI-1 |
+| Dockerfile | 容器化 | P5-Deploy-1 |
+| 监控面板 | 健康检查 + 指标 | P2-Search-1 |
+| 数据迁移 | 导入/导出工具 | P2-Entity-1 |
+
+**Phase 5 工时：35h（2-3 周）**
 
 ---
 
