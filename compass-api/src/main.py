@@ -9,7 +9,8 @@ from fastapi import FastAPI
 
 from src import config
 from src.db.database import Database, set_db
-from src.api import entities, scores, feed, agent, graph, fetch, search, insights, decay, evolution, mcp
+from src.api import entities, scores, feed, agent, graph, fetch, search, insights, decay, evolution
+from src import mcp
 
 # Global DB — initialized once at startup
 db = Database()
