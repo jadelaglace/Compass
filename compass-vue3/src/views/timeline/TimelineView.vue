@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { onMounted, computed } from 'vue'
 import { useTimelineStore, type EventType } from '@/stores/timeline'
 import TimelineItem from '@/components/timeline/TimelineItem.vue'
 
 const timelineStore = useTimelineStore()
+
+onMounted(() => timelineStore.fetchTimeline())
 
 const filters: { label: string; value: EventType }[] = [
   { label: '全部', value: 'all' },

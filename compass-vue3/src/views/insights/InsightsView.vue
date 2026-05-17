@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useInsightsStore, type Insight, type Maturity } from '@/stores/insights'
 import InsightCard from '@/components/insights/InsightCard.vue'
 import InsightForm from '@/components/insights/InsightForm.vue'
@@ -7,6 +7,7 @@ import RadarChart from '@/components/insights/RadarChart.vue'
 import ScoreHistoryChart from '@/components/insights/ScoreHistoryChart.vue'
 
 const store = useInsightsStore()
+onMounted(() => store.fetchInsights())
 const showModal = ref(false)
 const editingInsight = ref<Insight | null>(null)
 
@@ -30,7 +31,7 @@ function handleSave(data: { content: string; maturity: Maturity; entity_title: s
   if (editingInsight.value) {
     store.updateInsight(editingInsight.value.id, data)
   } else {
-    store.addInsight(data)
+    store.createInsight(data).then(() => store.fetchInsights())
   }
 }
 

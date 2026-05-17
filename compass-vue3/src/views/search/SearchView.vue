@@ -1,18 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import apiClient from '@/api/client'
 import type { SearchResult } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
 const query = ref((route.query.q as string) ?? '')
 const loading = ref(false)
-
-const MOCK_RESULTS: SearchResult[] = [
-  { entity: { id: '1', title: 'Compass 架构设计', content: 'Rust core + Python FastAPI glue 两层架构', entity_type: 'concept', status: 'active', maturity: 5, score: 0.95, tags: ['架构', 'Rust'], created_at: '', updated_at: '' }, score: 0.95, highlights: ['Compass <mark>架构</mark>设计', 'Rust core + Python FastAPI <mark>架构</mark>'] },
-  { entity: { id: '3', title: 'FTS5 全文搜索优化', content: 'BM25 + FTS5 混合搜索算法实现', entity_type: 'concept', status: 'active', maturity: 4, score: 0.82, tags: ['FTS5', '搜索'], created_at: '', updated_at: '' }, score: 0.78, highlights: ['FTS5 <mark>全文搜索</mark>优化', 'BM25 + FTS5 <mark>搜索</mark>'] },
-  { entity: { id: '6', title: 'D3.js 力导向图', content: '基于 D3 force simulation 的知识图谱可视化', entity_type: 'article', status: 'active', maturity: 2, score: 0.65, tags: ['D3', '可视化'], created_at: '', updated_at: '' }, score: 0.55, highlights: ['D3.js <mark>搜索</mark>力导向图'] },
-]
 
 const results = ref<SearchResult[]>([])
 const hasSearched = ref(false)
@@ -24,14 +19,19 @@ watch(() => route.query.q, (q) => {
   }
 }, { immediate: true })
 
-function performSearch(q: string) {
+async function performSearch(q: string) {
   if (!q.trim()) return
   loading.value = true
   hasSearched.value = true
-  setTimeout(() => {
-    results.value = MOCK_RESULTS
+  try {
+    const res = await apiClient.post('/search', { query: q, limit: 20 })
+    results.value = res.data.results || []
+  } catch (err) {
+    console.error('[search] failed:', err)
+    results.value = []
+  } finally {
     loading.value = false
-  }, 400)
+  }
 }
 
 function handleSearch() {

@@ -13,7 +13,7 @@ const emit = defineEmits<{
 }>()
 
 const content = ref('')
-const maturity = ref<Maturity>('draft')
+const maturity = ref<Maturity>('seed')
 const entity_title = ref('')
 const entity_id = ref('')
 
@@ -21,11 +21,11 @@ watch(() => props.insight, (i) => {
   if (i) {
     content.value = i.content
     maturity.value = i.maturity
-    entity_title.value = i.entity_title
+    entity_title.value = (i as any).entity_title || ''
     entity_id.value = i.entity_id
   } else {
     content.value = ''
-    maturity.value = 'draft'
+    maturity.value = 'seed'
     entity_title.value = ''
     entity_id.value = ''
   }
@@ -63,9 +63,11 @@ function handleSave() {
           <label class="field">
             <span>成熟度</span>
             <select v-model="maturity">
-              <option value="draft">草稿</option>
-              <option value="validated">已验证</option>
-              <option value="mature">成熟</option>
+              <option value="seed">种子</option>
+              <option value="sprout">萌芽</option>
+              <option value="bud">花苞</option>
+              <option value="bloom">绽放</option>
+              <option value="ripe">成熟</option>
             </select>
           </label>
         </div>
