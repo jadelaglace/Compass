@@ -14,13 +14,11 @@ const entityStore = useEntityStore()
 const entity = ref<Entity | null>(null)
 const loading = ref(true)
 
-onMounted(() => {
+onMounted(async () => {
   const id = route.params.id as string
-  const found = entityStore.entities.find(e => e.id === id)
-  setTimeout(() => {
-    entity.value = found ?? null
-    loading.value = false
-  }, 300)
+  const data = await entityStore.fetchEntity(id)
+  entity.value = data
+  loading.value = false
 })
 
 const renderedContent = computed(() => {
@@ -35,7 +33,7 @@ const renderedContent = computed(() => {
 
 function confirmDelete() {
   if (confirm(`确定删除「${entity.value?.title}」？`)) {
-    entityStore.entities = entityStore.entities.filter(e => e.id !== entity.value?.id)
+    entityStore.deleteEntity(entity.value!.id)
     router.push({ name: 'entities' })
   }
 }

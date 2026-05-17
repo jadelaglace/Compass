@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import apiClient from '@/api/client'
 
 export type EventType = 'all' | 'access' | 'score_change' | 'tag_add' | 'insight_mature'
 
@@ -12,21 +13,40 @@ export interface TimelineEvent {
   description: string
 }
 
-const MOCK_EVENTS: TimelineEvent[] = [
-  { id: '1', entity_id: '1', entity_title: 'Compass 架构设计', event_type: 'access', timestamp: '2026-05-08T22:00:00Z', description: '查看了实体' },
-  { id: '2', entity_id: '2', entity_title: 'Phase 4 前端规划', event_type: 'score_change', timestamp: '2026-05-08T20:00:00Z', description: '评分从 0.82 → 0.88' },
-  { id: '3', entity_id: '3', entity_title: 'FTS5 全文搜索优化', event_type: 'tag_add', timestamp: '2026-05-07T18:00:00Z', description: '新增标签: 搜索' },
-  { id: '4', entity_id: '4', entity_title: 'Decay 衰减算法', event_type: 'insight_mature', timestamp: '2026-05-07T12:00:00Z', description: 'Insight 已成熟：触发实体升级' },
-  { id: '5', entity_id: '1', entity_title: 'Compass 架构设计', event_type: 'access', timestamp: '2026-05-06T10:00:00Z', description: '查看了实体' },
-  { id: '6', entity_id: '5', entity_title: 'OpenClaw Skill 架构', event_type: 'score_change', timestamp: '2026-05-05T08:00:00Z', description: '评分从 0.65 → 0.71' },
-]
-
 export const useTimelineStore = defineStore('timeline', () => {
-  const events = ref<TimelineEvent[]>(MOCK_EVENTS)
+  const events = ref<TimelineEvent[]>([])
   const filter = ref<EventType>('all')
   const loading = ref(false)
 
+  const fetchTimeline = async (entityId?: string) => {
+    loading.value = true
+    try {
+      if (entityId) {
+        const res = await apiClient.get(`/entities/${entityId}/timeline`)
+        events.value = res.data.events || []
+      } else {
+        // 全局 timeline：取最近更新的实体，批量拉 timeline
+        const entRes = await apiClient.get('/entities', { params: { sort: 'updated', page_size: '20' } })
+        const entities = entRes.data.entities || []
+        const allEvents: TimelineEvent[] = []
+        for (const ent of entities.slice(0, 10)) {
+          try {
+            const evRes = await apiClient.get(`/entities/${ent.id}/timeline`)
+            for (const ev of (evRes.data.events || [])) {
+              allEvents.push({ ...ev, entity_title: ent.title })
+            }
+          } catch {}
+        }
+        events.value = allEvents.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      }
+    } catch (err) {
+      console.error('[timeline store] fetchTimeline failed:', err)
+    } finally {
+      loading.value = false
+    }
+  }
+
   const setFilter = (t: EventType) => { filter.value = t }
 
-  return { events, filter, loading, setFilter }
+  return { events, filter, loading, fetchTimeline, setFilter }
 })

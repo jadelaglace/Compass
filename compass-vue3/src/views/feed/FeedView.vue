@@ -1,8 +1,11 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
 import { useFeedStore, type EntityType } from '@/stores/feed'
 import EntityCard from '@/components/feed/EntityCard.vue'
 
 const feedStore = useFeedStore()
+
+onMounted(() => feedStore.fetchFeed())
 
 const filters: { label: string; value: EntityType }[] = [
   { label: '全部', value: 'all' },

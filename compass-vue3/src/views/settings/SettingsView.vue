@@ -134,8 +134,6 @@ const yTicks = computed(() => {
   return Array.from({ length: 5 }, (_, i) => Math.round(step * i * 10) / 10)
 })
 
-function formatScore(v: number) { return v.toFixed(2) }
-
 function saveWeights() {
   console.log('[Settings] Save weights:', { ...weights })
   // TODO: call PATCH /config

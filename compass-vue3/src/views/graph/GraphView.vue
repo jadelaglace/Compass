@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
 import ForceGraph from '@/components/graph/ForceGraph.vue'
 import { useGraphStore } from '@/stores/graph'
 
 const graphStore = useGraphStore()
+onMounted(() => graphStore.fetchGraph())
 </script>
 
 <template>

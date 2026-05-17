@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import type { Insight } from '@/stores/insights'
+import type { Insight, Maturity } from '@/stores/insights'
 
-const props = defineProps<{ insight: Insight }>()
+const props = defineProps<{ insight: Insight & { entity_title?: string } }>()
 const emit = defineEmits<{
   edit: [id: string]
   delete: [id: string]
 }>()
 
-const maturityConfig = {
-  draft: { label: '草稿', color: '#6b7280', bg: '#f3f4f6' },
-  validated: { label: '已验证', color: '#2563eb', bg: '#eff6ff' },
-  mature: { label: '成熟', color: '#059669', bg: '#ecfdf5' },
+const maturityConfig: Record<Maturity, { label: string; color: string; bg: string }> = {
+  seed: { label: '种子', color: '#6b7280', bg: '#f3f4f6' },
+  sprout: { label: '萌芽', color: '#10b981', bg: '#ecfdf5' },
+  bud: { label: '花苞', color: '#f59e0b', bg: '#fffbeb' },
+  bloom: { label: '绽放', color: '#3b82f6', bg: '#eff6ff' },
+  ripe: { label: '成熟', color: '#059669', bg: '#ecfdf5' },
 }
 </script>
 
