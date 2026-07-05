@@ -1,32 +1,33 @@
-//! compass-core — Rust binary for Compass scoring engine and reference parsing.
-//!
-//! Usage (subprocess mode):
-//!   echo '{"jsonrpc":"2.0","method":"compute_score","params":{...},"id":1}' | compass_core
-//!
-//! Modes:
-//!   (no args) — RPC mode over stdin/stdout (default)
-//!   --test     — Run unit tests
+﻿//! Compass — 评分引力场引擎（纯 Rust 单二进制）。
+//! T1.1 骨架：加载配置 + 启动 axum /health。
 
+mod api;
+mod config;
+mod db;
+mod frontmatter;
 mod models;
-mod reference;
-mod rpc;
 mod scoring;
+mod watcher;
 
-use std::env;
+use std::sync::Arc;
+use tracing::info;
 
-fn main() {
-    env_logger::init();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
-    let args: Vec<String> = env::args().collect();
+    let cfg = config::Config::load()?;
+    let addr = format!("0.0.0.0:{}", cfg.port);
+    info!(vault = %cfg.vault_path.display(), port = cfg.port, "Compass starting");
 
-    if args.len() > 1 && args[1] == "--test" {
-        // Run tests and exit
-        // Note: in real usage, `cargo test` handles this
-        // This flag is for the Python test runner to verify the binary
-        println!("Binary OK — RPC mode ready");
-        return;
-    }
-
-    // Default: RPC server mode
-    rpc::run();
+    let app = api::router(Arc::new(cfg));
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!(%addr, "listening");
+    axum::serve(listener, app).await?;
+    Ok(())
 }

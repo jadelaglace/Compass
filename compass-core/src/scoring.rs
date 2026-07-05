@@ -1,163 +1,115 @@
-//! Scoring engine with decay calculation.
+﻿//! 评分引擎核心：综合分 + 衰减（修正 v2.x 两处漂移）。
 //!
-//! # Weights
-//! - interest: 0.40
-//! - strategy: 0.35
-//! - consensus: 0.25
+//! 不变量：
+//! 1. composite = interest*0.40 + strategy*0.35 + consensus*0.25（默认权重）
+//! 2. 衰减只作用于 interest：new = max(interest*floor, interest*rate^days)
 //!
-//! # Decay Formula
-//! `decay_factor = 0.5 ^ (days_elapsed / half_life_days)`
+//! 注：不变量 2 由 `decay_interest` 的签名结构性保证——它只接收 interest，
+//! strategy/consensus 根本不入参，故无法被衰减。
 
-use crate::models::{ScoringInput, ScoringOutput};
+use crate::models::Weights;
 
-const WEIGHT_INTEREST: f64 = 0.40;
-const WEIGHT_STRATEGY: f64 = 0.35;
-const WEIGHT_CONSENSUS: f64 = 0.25;
-
-/// Decay calculator using exponential half-life model.
-#[derive(Debug, Clone)]
-pub struct DecayCalculator {
-    half_life_days: f64,
+/// 计算综合分，范围 [0,100]，四舍五入到 1 位小数。
+pub fn composite(interest: f64, strategy: f64, consensus: f64, w: &Weights) -> f64 {
+    let v = interest * w.interest + strategy * w.strategy + consensus * w.consensus;
+    let rounded = (v * 10.0).round() / 10.0;
+    rounded.clamp(0.0, 100.0)
 }
 
-impl DecayCalculator {
-    pub fn new(half_life_days: f64) -> Self {
-        Self { half_life_days }
+/// interest 维度衰减。每日 rate，地板 floor（相对初始值）。
+/// strategy / consensus 不衰减（由签名结构性保证）。
+/// days_inactive <= 0 视为无衰减，返回原值。
+pub fn decay_interest(interest: f64, days_inactive: i64, daily_rate: f64, floor: f64) -> f64 {
+    if days_inactive <= 0 {
+        return interest;
     }
-
-    /// Compute decay factor for a given number of days elapsed.
-    /// Returns `0.5 ^ (days / half_life)`.
-    pub fn factor(&self, days_elapsed: f64) -> f64 {
-        if self.half_life_days <= 0.0 {
-            return 1.0;
-        }
-        0.5_f64.powf(days_elapsed / self.half_life_days)
-    }
-}
-
-/// Scoring engine — computes final scores with multi-dimension decay.
-pub struct ScoringEngine;
-
-impl ScoringEngine {
-    /// Compute final score with decay applied to each dimension.
-    /// Method 2: each dimension independently decays, then weighted sum.
-    /// final = (interest * decay_i * 0.4) + (strategy * decay_s * 0.35) + (consensus * decay_c * 0.25)
-    pub fn compute(input: ScoringInput) -> ScoringOutput {
-        let days_elapsed = Self::days_since(&input.last_boosted_at);
-
-        let decay_interest = DecayCalculator::new(30.0).factor(days_elapsed);
-        let decay_strategy = DecayCalculator::new(365.0).factor(days_elapsed);
-        let decay_consensus = DecayCalculator::new(60.0).factor(days_elapsed);
-
-        // Each dimension independently decayed, then weighted
-        let final_score =
-            input.interest * decay_interest * WEIGHT_INTEREST
-            + input.strategy * decay_strategy * WEIGHT_STRATEGY
-            + input.consensus * decay_consensus * WEIGHT_CONSENSUS;
-
-        // Composite decay factor for reporting
-        let decay_factor =
-            decay_interest * WEIGHT_INTEREST
-            + decay_strategy * WEIGHT_STRATEGY
-            + decay_consensus * WEIGHT_CONSENSUS;
-
-        ScoringOutput {
-            final_score: Self::round2(final_score),
-            decay_factor: Self::round2(decay_factor),
-            days_elapsed: Self::round2(days_elapsed),
-        }
-    }
-
-    /// Parse ISO 8601 timestamp and compute days since.
-    fn days_since(timestamp: &str) -> f64 {
-
-        let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
-            log::warn!("Failed to parse timestamp '{}', assuming 0 days", timestamp);
-            return 0.0;
-        };
-        let dt = dt.with_timezone(&chrono::Utc);
-
-        let now = chrono::Utc::now();
-        let duration = now.signed_duration_since(dt);
-        duration.num_seconds() as f64 / (24.0 * 3600.0)
-    }
-
-    fn round2(v: f64) -> f64 {
-        format!("{:.2}", v).parse().unwrap_or(v)
-    }
+    let decayed = interest * daily_rate.powi(days_inactive as i32);
+    decayed.max(interest * floor)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn w() -> Weights { Weights::default() }
+
     #[test]
-    fn test_decay_half_life_exact() {
-        let decay = DecayCalculator::new(30.0);
-        let factor = decay.factor(30.0);
-        assert!((factor - 0.5).abs() < f64::EPSILON);
+    fn test_default_weights_sum_to_one() {
+        let w = w();
+        assert!(w.is_normalized(), "默认权重应归一，和为 {}", w.sum());
     }
 
     #[test]
-    fn test_decay_quarter_life() {
-        // 15 days ≈ sqrt(0.5) ≈ 0.707
-        let decay = DecayCalculator::new(30.0);
-        let factor = decay.factor(15.0);
-        assert!((factor - 0.7071).abs() < 0.001);
+    fn test_composite_default_weights() {
+        // 8*0.4 + 10*0.35 + 4*0.25 = 3.2 + 3.5 + 1.0 = 7.7（避开 .x5 舍入边界）
+        let c = composite(8.0, 10.0, 4.0, &w());
+        assert!((c - 7.7).abs() < 1e-6, "composite 应为 7.7，实际 {c}");
     }
 
     #[test]
-    fn test_final_score_zero_days() {
-        let now = chrono::Utc::now().to_rfc3339();
-        let input = ScoringInput {
-            interest: 10.0,
-            strategy: 10.0,
-            consensus: 10.0,
-            last_boosted_at: now,
-            interest_half_life_days: 30.0,
-            strategy_half_life_days: 365.0,
-            consensus_half_life_days: 60.0,
-        };
-        let output = ScoringEngine::compute(input);
-        // All weights sum to 1.0, decay_factor = 1.0 at 0 days
-        assert!((output.final_score - 10.0).abs() < 0.01);
-        assert!((output.decay_factor - 1.0).abs() < 0.0001);
+    fn test_composite_custom_weights_override() {
+        // F4: 自定义归一权重覆盖默认
+        let w = Weights { interest: 0.5, strategy: 0.3, consensus: 0.2 };
+        assert!(w.is_normalized());
+        // 8*0.5 + 0*0.3 + 0*0.2 = 4.0（默认权重下会是 8*0.4=3.2，证明覆盖生效）
+        let c = composite(8.0, 0.0, 0.0, &w);
+        assert!((c - 4.0).abs() < 1e-6, "自定义权重下应为 4.0，实际 {c}");
     }
 
     #[test]
-    fn test_final_score_formula_weights() {
-        let now = chrono::Utc::now().to_rfc3339();
-        let input = ScoringInput {
-            interest: 8.0,
-            strategy: 9.0,
-            consensus: 4.0,
-            last_boosted_at: now,
-            interest_half_life_days: 30.0,
-            strategy_half_life_days: 365.0,
-            consensus_half_life_days: 60.0,
-        };
-        let output = ScoringEngine::compute(input);
-        // 8*0.4 + 9*0.35 + 4*0.25 = 3.2 + 3.15 + 1.0 = 7.35
-        assert!((output.final_score - 7.35).abs() < 0.01);
+    fn test_composite_at_max_boundary() {
+        // (100,100,100) + 归一权重 正好 100
+        let c = composite(100.0, 100.0, 100.0, &w());
+        assert!((c - 100.0).abs() < 1e-6);
     }
 
     #[test]
-    fn test_final_score_with_decay_method2() {
-        // 30 days ago: interest decay = 0.5, strategy decay ≈ 0.94, consensus decay ≈ 0.69
-        let past = "2026-03-07T00:00:00Z";
-        let input = ScoringInput {
-            interest: 10.0,
-            strategy: 10.0,
-            consensus: 10.0,
-            last_boosted_at: past.to_string(),
-            interest_half_life_days: 30.0,
-            strategy_half_life_days: 365.0,
-            consensus_half_life_days: 60.0,
-        };
-        let output = ScoringEngine::compute(input);
-        // Method 2: (10*0.5*0.4) + (10*decay_s*0.35) + (10*decay_c*0.25) < 10.0
-        assert!(output.final_score < 10.0); // Must be less than 10.0 due to decay
-        assert!(output.final_score > 6.0);  // But meaningfully above floor
-        assert!(output.days_elapsed > 20.0); // ~30 days elapsed
+    fn test_composite_clamps_overflow() {
+        // F4: 真正测超出上界——非归一权重(和=1.5)使 (100,100,100)->150，clamp 到 100
+        let w = Weights { interest: 0.5, strategy: 0.5, consensus: 0.5 };
+        assert!(!w.is_normalized());
+        let c = composite(100.0, 100.0, 100.0, &w);
+        assert!((c - 100.0).abs() < 1e-6, "超出上界应被 clamp 到 100，实际 {c}");
+    }
+
+    #[test]
+    fn test_composite_clamps_negative() {
+        // F4: 下界 clamp——负输入归一加权后为负，clamp 到 0
+        let c = composite(-50.0, -50.0, -50.0, &w());
+        assert!((c - 0.0).abs() < 1e-6, "负值应被 clamp 到 0，实际 {c}");
+    }
+
+    #[test]
+    fn test_decay_30_days_half() {
+        // 0.98^30 ≈ 0.545，仍高于 floor 0.5
+        let new = decay_interest(100.0, 30, 0.98, 0.5);
+        assert!(new > 50.0 && new < 55.0, "30 天衰减后应 ≈54.5，实际 {new}");
+    }
+
+    #[test]
+    fn test_decay_floor_enforced() {
+        // 0.98^200 ≈ 0.0176，远低于 floor，应被 floor 拉回 50
+        let new = decay_interest(100.0, 200, 0.98, 0.5);
+        assert!((new - 50.0).abs() < 1e-6, "应被地板拉回 50，实际 {new}");
+    }
+
+    #[test]
+    fn test_decay_zero_days_noop() {
+        let new = decay_interest(85.0, 0, 0.98, 0.5);
+        assert!((new - 85.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_decay_negative_days_noop() {
+        // F4: 负天数边界——应视为 0，返回原值
+        let new = decay_interest(85.0, -5, 0.98, 0.5);
+        assert!((new - 85.0).abs() < 1e-9, "负天数应返回原值，实际 {new}");
+    }
+
+    #[test]
+    fn test_weights_is_normalized_detects_bad() {
+        // F3 配套：is_normalized 能识别非归一权重
+        assert!(Weights::default().is_normalized());
+        assert!(!Weights { interest: 0.5, strategy: 0.5, consensus: 0.5 }.is_normalized()); // 和=1.5 不归一
     }
 }
