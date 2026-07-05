@@ -57,6 +57,28 @@ def http_get(path: str, params: dict | None = None) -> dict:
         sys.exit(1)
 
 
+def http_patch(path: str, data: dict) -> dict:
+    url = api_url(path)
+    body_bytes = json.dumps(data).encode()
+    req = urllib.request.Request(url, data=body_bytes, method="PATCH")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        try:
+            err_body = json.loads(body)
+            print(json.dumps({"error": err_body.get("detail", body), "status": e.code}), file=sys.stderr)
+        except Exception:
+            print(json.dumps({"error": body or e.reason, "status": e.code}), file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(json.dumps({"error": f"connection refused — is compass-api running? ({e.reason})"}), file=sys.stderr)
+        sys.exit(1)
+
+
 def http_post(path: str, data: dict) -> dict:
     url = api_url(path)
     body_bytes = json.dumps(data).encode()
@@ -95,7 +117,7 @@ def parse_keyval(args: list[str]) -> dict:
 def action_search(params: dict) -> None:
     q = params.get("q", "")
     limit = int(params.get("limit", 20))
-    result = http_get("/entities/search", {"q": q, "limit": limit})
+    result = http_get("/search", {"q": q, "limit": limit})
     print(json.dumps(result, indent=2))
 
 
@@ -117,7 +139,7 @@ def action_get(params: dict) -> None:
 
 def action_feed(params: dict) -> None:
     limit = int(params.get("limit", 10))
-    result = http_get("/feed/today", {"limit": limit})
+    result = http_get("/feed", {"limit": limit})
     print(json.dumps(result, indent=2))
 
 
@@ -158,12 +180,12 @@ def action_score(params: dict) -> None:
         print(json.dumps({"error": "id is required"}), file=sys.stderr)
         sys.exit(1)
 
-    data = {"entity_id": entity_id}
+    data = {}
     for dim in ("interest", "strategy", "consensus"):
         if dim in params:
             data[dim] = float(params[dim])
 
-    result = http_post("/scores/update", data)
+    result = http_patch(f"/entities/{entity_id}/score", data)
     print(json.dumps(result, indent=2))
 
 
