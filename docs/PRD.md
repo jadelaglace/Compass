@@ -1,3 +1,7 @@
+﻿> ⚠️ **已废弃 (DEPRECATED) — 2026-07-05**
+> 本文档已被 `docs/PRD_v3.0.md` 取代。转向依据见 `docs/REVIEW_整体分析结论.md`。请勿据本文档继续开发。
+
+---
 # Compass 产品需求文档
 
 | 字段 | 内容 |
@@ -283,3 +287,4 @@ Week 8
 | Boost | 被引用时评分上升 |
 | Decay | 时间流逝时评分自然衰减 |
 | Consensus | 被引用次数越多，consensus 越高 |
+

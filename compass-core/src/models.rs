@@ -1,56 +1,43 @@
-//! Shared data structures for Rust-Python communication via JSON-RPC.
-//!
-//! All structures are serialized to/from JSON for subprocess communication.
+﻿//! 共享数据结构。
 
 use serde::{Deserialize, Serialize};
 
-/// Input for scoring computation.
-/// Passed via JSON-RPC `params` field.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ScoringInput {
+/// 三维权重（默认 0.40 / 0.35 / 0.25）。
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct Weights {
     pub interest: f64,
     pub strategy: f64,
     pub consensus: f64,
-    /// ISO 8601 timestamp of last boost event.
+}
+
+impl Default for Weights {
+    fn default() -> Self {
+        Self { interest: 0.40, strategy: 0.35, consensus: 0.25 }
+    }
+}
+
+/// 实体层级（三大界）。
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Layer {
+    Direction,
+    Knowledge,
+    Case,
+    Log,
+    Insight,
+}
+
+/// frontmatter 中的 score 块（Compass 写回，Dataview 可读）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Score {
+    pub interest: f64,
+    pub strategy: f64,
+    pub consensus: f64,
+    pub composite: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<Weights>,
+    pub updated_at: String,
     pub last_boosted_at: String,
-    /// Half-life in days for interest decay. Default: 30.0
-    #[serde(default = "default_interest_half_life")]
-    pub interest_half_life_days: f64,
-    /// Half-life in days for strategy decay. Default: 365.0
-    #[serde(default = "default_strategy_half_life")]
-    pub strategy_half_life_days: f64,
-    /// Half-life in days for consensus decay. Default: 60.0
-    #[serde(default = "default_consensus_half_life")]
-    pub consensus_half_life_days: f64,
-}
-
-fn default_interest_half_life() -> f64 { 30.0 }
-fn default_strategy_half_life() -> f64 { 365.0 }
-fn default_consensus_half_life() -> f64 { 60.0 }
-
-/// Output from scoring computation.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ScoringOutput {
-    pub final_score: f64,
-    pub decay_factor: f64,
-    pub days_elapsed: f64,
-}
-
-/// Input for reference parsing.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReferenceInput {
-    /// Raw markdown content to extract [[id]] references from.
-    pub content: String,
-    /// Optional: filter out self-references to this entity ID.
-    pub current_entity_id: Option<String>,
-}
-
-/// Output from reference parsing.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReferenceOutput {
-    pub refs: Vec<String>,
+    #[serde(default)]
+    pub access_count: i64,
 }
