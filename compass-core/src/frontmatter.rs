@@ -2,6 +2,9 @@
 //!
 //! 设计：**文本级替换 score 块**，不全量重序列化 frontmatter，以严格保留
 //! 其他字段（id/title/tags/...）的原始文本与格式，只动 score 块。
+//!
+//! 注：文件锁为 advisory（独立 .lock 文件），只防 compass 自身并发写，
+//! 不防 Obsidian 等外部编辑器直接改 .md（外部编辑 last-write-wins）。
 
 use std::fs;
 use std::io::Write;
@@ -28,6 +31,7 @@ pub fn read_note(path: &Path) -> Result<Note> {
 
 /// 拆分 `---\n<yaml>\n---\n<body>`。
 pub fn split_frontmatter(content: &str) -> Result<(String, String)> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let lines: Vec<&str> = content.lines().collect();
     if lines.first().map(|l| l.trim() != "---").unwrap_or(true) {
         return Err(anyhow!("缺少开头的 ---"));
@@ -275,5 +279,27 @@ mod tests {
     fn test_rejects_missing_frontmatter() {
         let r = split_frontmatter("no frontmatter here");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_write_score_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, sample_md()).unwrap();
+        write_score(&path, &sample_score()).unwrap();
+        // round-trip: read_note 能重新解析
+        let note = read_note(&path).unwrap();
+        let s = get_score(&note.frontmatter).unwrap().unwrap();
+        assert!((s.interest - 8.5).abs() < 1e-9);
+        assert_eq!(s.access_count, 3);
+        assert!(note.body.contains("# Game Theory"));
+    }
+
+    #[test]
+    fn test_split_frontmatter_handles_bom() {
+        let md = format!("\u{feff}{}", sample_md());
+        let (fm, body) = split_frontmatter(&md).unwrap();
+        assert!(fm.contains("id: know-000001"));
+        assert!(body.contains("# Game Theory"));
     }
 }
