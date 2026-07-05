@@ -277,13 +277,18 @@ def _render_score(data: dict) -> str:
 def action_render(params: dict) -> None:
     raw = params.get("raw")
     action_name = params.get("action")
+    # 优先 raw= 参数；未提供则从 stdin 读（支持管道，#159）
+    if not raw and not sys.stdin.isatty():
+        raw = sys.stdin.read()
     if not raw:
-        print(json.dumps({"error": "raw is required"}), file=sys.stderr)
+        print(json.dumps({"error": "raw is required (via raw= arg or stdin)"}), file=sys.stderr)
         sys.exit(1)
     if not action_name:
         print(json.dumps({"error": "action is required"}), file=sys.stderr)
         sys.exit(1)
 
+    # 容忍前导 UTF-8 BOM（stdin 来自部分 shell/管道时会带 BOM）
+    raw = raw.lstrip("\ufeff")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
