@@ -1,6 +1,6 @@
 ﻿//! 加载 compass.toml 运行时配置。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use serde::Deserialize;
 use crate::models::Weights;
 
@@ -47,6 +47,7 @@ impl Default for DecayConfig {
 impl Config {
     /// 从 `COMPASS_CONFIG` 环境变量或默认 `compass.toml` 加载。
     /// `vault_path` 若为相对路径，相对 config 文件目录解析为绝对路径。
+    /// 校验权重归一化（F3）。
     pub fn load() -> anyhow::Result<Self> {
         let path = std::env::var("COMPASS_CONFIG")
             .map(PathBuf::from)
@@ -55,12 +56,22 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("读取配置失败 {}: {e}", path.display()))?;
         let mut cfg: Config = toml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("解析配置失败: {e}"))?;
+
+        // F3: 校验权重归一化
+        if !cfg.weights.is_normalized() {
+            return Err(anyhow::anyhow!(
+                "weights 归一化错误：和为 {}，应为 1.0（检查 compass.toml [weights]）",
+                cfg.weights.sum()
+            ));
+        }
+
         if cfg.vault_path.is_relative() {
+            // F2: 错误传播，不再静默吞
             let base = path
                 .parent()
-                .unwrap_or(Path::new("."))
+                .ok_or_else(|| anyhow::anyhow!("无法获取配置文件父目录: {}", path.display()))?
                 .canonicalize()
-                .unwrap_or_default();
+                .map_err(|e| anyhow::anyhow!("配置文件父目录 canonicalize 失败: {e}"))?;
             cfg.vault_path = base.join(&cfg.vault_path);
         }
         cfg.vault_path = cfg.vault_path.canonicalize().map_err(|e| {

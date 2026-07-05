@@ -10,6 +10,18 @@ pub struct Weights {
     pub consensus: f64,
 }
 
+impl Weights {
+    /// 权重和是否归一（== 1.0，容差 1e-6）。
+    pub fn is_normalized(&self) -> bool {
+        (self.interest + self.strategy + self.consensus - 1.0).abs() < 1e-6
+    }
+
+    /// 权重和。
+    pub fn sum(&self) -> f64 {
+        self.interest + self.strategy + self.consensus
+    }
+}
+
 impl Default for Weights {
     fn default() -> Self {
         Self { interest: 0.40, strategy: 0.35, consensus: 0.25 }
