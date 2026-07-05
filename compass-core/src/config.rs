@@ -1,4 +1,4 @@
-﻿//! 加载 compass.toml 运行时配置。
+//! 加载 compass.toml 运行时配置。
 
 use std::path::PathBuf;
 use serde::Deserialize;
@@ -66,12 +66,18 @@ impl Config {
         }
 
         if cfg.vault_path.is_relative() {
-            // F2: 错误传播，不再静默吞
-            let base = path
+            // F2: 错误传播；裸文件名时 parent 为空，回退到 CWD
+            let parent = path
                 .parent()
-                .ok_or_else(|| anyhow::anyhow!("无法获取配置文件父目录: {}", path.display()))?
-                .canonicalize()
-                .map_err(|e| anyhow::anyhow!("配置文件父目录 canonicalize 失败: {e}"))?;
+                .ok_or_else(|| anyhow::anyhow!("无法获取配置文件父目录: {}", path.display()))?;
+            let base = if parent.as_os_str().is_empty() {
+                std::env::current_dir()
+                    .map_err(|e| anyhow::anyhow!("获取当前目录失败: {e}"))?
+            } else {
+                parent
+                    .canonicalize()
+                    .map_err(|e| anyhow::anyhow!("配置文件父目录 canonicalize 失败: {e}"))?
+            };
             cfg.vault_path = base.join(&cfg.vault_path);
         }
         cfg.vault_path = cfg.vault_path.canonicalize().map_err(|e| {
