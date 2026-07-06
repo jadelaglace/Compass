@@ -1,4 +1,4 @@
-﻿# Compass PRD v3.0 — 重做版精简规格
+# Compass PRD v3.0 — 重做版精简规格
 
 > 版本：v3.0 ｜ 日期：2026-07-05
 > 性质：实施规格（替代 `PRD_v2.1` 的臃肿路线）
@@ -122,7 +122,9 @@ PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 
 CREATE TABLE entities (               -- vault 文件的索引镜像
   id TEXT PRIMARY KEY, file_path TEXT UNIQUE, title TEXT,
-  layer TEXT, status TEXT, composite REAL,
+  layer TEXT, status TEXT,
+  interest REAL, strategy REAL, consensus REAL,  -- 三维缓存（frontmatter 权威；列表/feed 查询免读文件）
+  composite REAL,
   access_count INTEGER, last_boosted_at TEXT,
   content_hash TEXT, updated_at TEXT
 );

@@ -1,14 +1,17 @@
 //! 加载 compass.toml 运行时配置。
 
-use std::path::PathBuf;
-use serde::Deserialize;
 use crate::models::Weights;
+use serde::Deserialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub vault_path: PathBuf,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// SQLite 索引库路径。相对配置文件目录解析；缺省 `.compass/index.db`。
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
     #[serde(default)]
     pub decay: DecayConfig,
     #[serde(default)]
@@ -27,11 +30,21 @@ pub struct DecayConfig {
     pub direction_layer_factor: f64,
 }
 
-fn default_port() -> u16 { 8080 }
-fn default_rate() -> f64 { 0.98 }
-fn default_floor() -> f64 { 0.5 }
-fn default_boost_protection() -> i64 { 3 }
-fn default_direction_factor() -> f64 { 0.5 }
+fn default_port() -> u16 {
+    8080
+}
+fn default_rate() -> f64 {
+    0.98
+}
+fn default_floor() -> f64 {
+    0.5
+}
+fn default_boost_protection() -> i64 {
+    3
+}
+fn default_direction_factor() -> f64 {
+    0.5
+}
 
 impl Default for DecayConfig {
     fn default() -> Self {
@@ -46,7 +59,7 @@ impl Default for DecayConfig {
 
 impl Config {
     /// 从 `COMPASS_CONFIG` 环境变量或默认 `compass.toml` 加载。
-    /// `vault_path` 若为相对路径，相对 config 文件目录解析为绝对路径。
+    /// `vault_path` 与 `db_path` 若为相对路径，相对配置文件目录解析为绝对路径。
     /// 校验权重归一化（F3）。
     pub fn load() -> anyhow::Result<Self> {
         let path = std::env::var("COMPASS_CONFIG")
@@ -54,8 +67,8 @@ impl Config {
             .unwrap_or_else(|_| PathBuf::from("compass.toml"));
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读取配置失败 {}: {e}", path.display()))?;
-        let mut cfg: Config = toml::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("解析配置失败: {e}"))?;
+        let mut cfg: Config =
+            toml::from_str(&raw).map_err(|e| anyhow::anyhow!("解析配置失败: {e}"))?;
 
         // F3: 校验权重归一化
         if !cfg.weights.is_normalized() {
@@ -65,24 +78,37 @@ impl Config {
             ));
         }
 
+        // 配置文件父目录（相对路径基准）；为空时回退 CWD
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("无法获取配置文件父目录 {}", path.display()))?;
+        let base = if parent.as_os_str().is_empty() {
+            std::env::current_dir().map_err(|e| anyhow::anyhow!("获取当前目录失败: {e}"))?
+        } else {
+            parent
+                .canonicalize()
+                .map_err(|e| anyhow::anyhow!("配置文件父目录 canonicalize 失败: {e}"))?
+        };
+
+        // F2: 错误传播；解析 vault_path 为绝对
         if cfg.vault_path.is_relative() {
-            // F2: 错误传播；裸文件名时 parent 为空，回退到 CWD
-            let parent = path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("无法获取配置文件父目录: {}", path.display()))?;
-            let base = if parent.as_os_str().is_empty() {
-                std::env::current_dir()
-                    .map_err(|e| anyhow::anyhow!("获取当前目录失败: {e}"))?
-            } else {
-                parent
-                    .canonicalize()
-                    .map_err(|e| anyhow::anyhow!("配置文件父目录 canonicalize 失败: {e}"))?
-            };
             cfg.vault_path = base.join(&cfg.vault_path);
         }
-        cfg.vault_path = cfg.vault_path.canonicalize().map_err(|e| {
-            anyhow::anyhow!("vault_path 不存在 {}: {e}", cfg.vault_path.display())
-        })?;
+        cfg.vault_path = cfg
+            .vault_path
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("vault_path 不存在 {}: {e}", cfg.vault_path.display()))?;
+
+        // db_path：缺省 .compass/index.db，相对配置目录解析为绝对
+        let mut db_path = cfg
+            .db_path
+            .take()
+            .unwrap_or_else(|| PathBuf::from(".compass").join("index.db"));
+        if db_path.is_relative() {
+            db_path = base.join(&db_path);
+        }
+        cfg.db_path = Some(db_path);
+
         Ok(cfg)
     }
 }

@@ -30,3 +30,6 @@ data/
 # Local vault (user-specific knowledge base content)
 vault/
 uv.lock
+
+# Local commit-message scratch
+.commit-msg.txt
