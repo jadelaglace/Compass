@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use chrono::DateTime;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{Score, Weights};
 
@@ -33,7 +34,7 @@ pub fn decay_interest(interest: f64, days_inactive: i64, daily_rate: f64, floor:
 // ============ 触发器与访问深度（T1.3，PRD §5.3） ============
 
 /// 评分触发器类型（PRD §5.3 触发器表）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Trigger {
     /// 被引用 → consensus +2，冷却 1 天
     Cited,
@@ -72,7 +73,7 @@ impl Trigger {
 }
 
 /// 访问深度（PRD §5.3 访问深度 boost）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum AccessDepth {
     /// 浏览标题：interest +0，consensus +0.1
     Glance,
@@ -98,6 +99,8 @@ impl AccessDepth {
 
 /// 应用触发器 boost，返回新 Score（维度调整 + composite 重算 + last_boosted_at 更新）。
 /// **不做冷却检查**——冷却由调用方根据 per-type 历史用 `in_cooldown` 判断（历史存于 score_history，T1.4）。
+/// 便捷封装见 `apply_trigger_if_eligible`。
+/// `now` 须为合法 RFC3339 时间戳（本函数不校验，仅存入）。
 pub fn apply_trigger(score: &Score, trigger: Trigger, now: &str) -> Score {
     let (di, ds, dc) = trigger.deltas();
     let w = score.weights.unwrap_or_default();
@@ -126,8 +129,26 @@ pub fn apply_access(score: &Score, depth: AccessDepth, now: &str) -> Score {
     new
 }
 
+/// 应用触发器 boost，但先检查冷却：若 `last_for_type`（该触发器类型上次触发时间，
+/// 来自 score_history T1.4）存在且仍在冷却期，返回 `None`（应跳过）；否则 apply。
+/// `last_for_type` = `None` 表示该类型从未触发，直接 apply。无冷却期的触发器总是 apply。
+pub fn apply_trigger_if_eligible(
+    score: &Score,
+    trigger: Trigger,
+    now: &str,
+    last_for_type: Option<&str>,
+) -> Result<Option<Score>> {
+    if let (Some(cd), Some(last)) = (trigger.cooldown_days(), last_for_type) {
+        if in_cooldown(last, now, cd)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(apply_trigger(score, trigger, now)))
+}
+
 /// 冷却检查：`last_triggered` 距 `now` 不足 `cooldown_days` 天则仍在冷却期（返回 true，应跳过）。
-/// 时间为 RFC3339。elapsed 用整数天（截断）。
+/// 时间为 RFC3339。elapsed 用整数天（截断：23h=0, 25h=1），
+/// 故 1 天冷却 = 满 24h 后可触发。
 pub fn in_cooldown(last_triggered: &str, now: &str, cooldown_days: i64) -> Result<bool> {
     let last = parse_ts(last_triggered)?;
     let now = parse_ts(now)?;
@@ -360,5 +381,46 @@ mod tests {
     #[test]
     fn test_in_cooldown_bad_timestamp() {
         assert!(in_cooldown("not-a-time", "2026-07-06T00:00:00Z", 1).is_err());
+    }
+
+    // ---- F1: apply_trigger_if_eligible ----
+
+    #[test]
+    fn test_eligible_in_cooldown_returns_none() {
+        // Cited 冷却 1 天；last 12h 前 → 冷却，None
+        let r = apply_trigger_if_eligible(&base_score(), Trigger::Cited, "2026-07-06T00:00:00Z", Some("2026-07-05T12:00:00Z")).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn test_eligible_expired_applies() {
+        // last 2 天前，冷却 1 天 → 过冷却，apply
+        let r = apply_trigger_if_eligible(&base_score(), Trigger::Cited, "2026-07-06T00:00:00Z", Some("2026-07-04T00:00:00Z")).unwrap();
+        let s = r.unwrap();
+        assert!((s.consensus - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_eligible_no_cooldown_type_always_applies() {
+        // ManualMark 无冷却，即使 last 提供也 apply
+        let r = apply_trigger_if_eligible(&base_score(), Trigger::ManualMark, "2026-07-06T00:00:00Z", Some("2026-07-05T00:00:00Z")).unwrap();
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn test_eligible_never_triggered_applies() {
+        // last_for_type None → apply
+        let r = apply_trigger_if_eligible(&base_score(), Trigger::Cited, "2026-07-06T00:00:00Z", None).unwrap();
+        assert!(r.is_some());
+    }
+
+    // ---- F5: apply_access clamp ----
+
+    #[test]
+    fn test_apply_access_clamps_to_100() {
+        let mut s = base_score();
+        s.strategy = 98.0;
+        let s = apply_access(&s, AccessDepth::Apply, "2026-07-06T00:00:00Z");
+        assert!((s.strategy - 100.0).abs() < 1e-9, "98+5 应 clamp 到 100");
     }
 }
