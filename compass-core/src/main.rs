@@ -8,12 +8,15 @@ mod db;
 mod e2e_tests;
 mod frontmatter;
 mod models;
+mod scheduler;
 mod scoring;
 mod watcher;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
+
+use crate::scheduler::DecayScheduler;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,6 +53,15 @@ async fn main() -> anyhow::Result<()> {
         watcher::FileWatcher::new(cfg.vault_path.clone(), db.clone(), cfg.weights.clone());
     file_watcher.start().await?;
     info!("FileWatcher started");
+
+    // 启动衰减调度器
+    let decay_scheduler = DecayScheduler::new(
+        db.clone(),
+        cfg.vault_path.clone(),
+        cfg.weights.clone(),
+        cfg.decay.clone(),
+    );
+    decay_scheduler.start().await?;
 
     // 启动 HTTP API
     let app = api::router_from_config(Arc::new(cfg), db);
