@@ -135,7 +135,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> Json<serde_json::Value> {
+pub(crate) async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "name": "compass",
@@ -143,7 +143,7 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
-async fn feed(
+pub(crate) async fn feed(
     State(state): State<AppState>,
     Query(q): Query<FeedQuery>,
 ) -> Result<Json<Vec<EntitySummary>>, AppError> {
@@ -168,7 +168,7 @@ async fn feed(
     Ok(Json(summaries))
 }
 
-async fn entities_top(
+pub(crate) async fn entities_top(
     State(state): State<AppState>,
     Query(q): Query<TopQuery>,
 ) -> Result<Json<Vec<EntitySummary>>, AppError> {
@@ -198,7 +198,7 @@ async fn entities_top(
     Ok(Json(summaries))
 }
 
-async fn get_entity(
+pub(crate) async fn get_entity(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<EntityDetail>, AppError> {
@@ -227,7 +227,7 @@ async fn get_entity(
     }))
 }
 
-async fn search(
+pub(crate) async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchHit>>, AppError> {
@@ -244,7 +244,7 @@ async fn search(
     Ok(Json(results))
 }
 
-async fn create_entity(
+pub(crate) async fn create_entity(
     State(state): State<AppState>,
     Json(req): Json<CreateEntityRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
@@ -310,7 +310,7 @@ async fn create_entity(
     ))
 }
 
-async fn update_score(
+pub(crate) async fn update_score(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<ScoreUpdateRequest>,
@@ -380,7 +380,7 @@ async fn update_score(
     })))
 }
 
-async fn record_access(
+pub(crate) async fn record_access(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<AccessRequest>,

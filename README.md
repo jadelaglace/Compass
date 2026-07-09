@@ -1,273 +1,190 @@
-# Compass · 罗盘
+# Compass 罗盘
 
-> 个人认知操作系统 · Personal Compass OS
+> 个人知识宇宙系统 — 以三维评分（interest/strategy/consensus）为"引力场"，让高价值内容自然浮现，让过时内容优雅衰减。
 
----
+## 核心理念
 
-## 产品定位
+- **评分是灵魂**：三维评分是唯一差异化，决定每个知识元素的"价值"与"位置"
+- **frontmatter 是根**：Markdown + frontmatter 50 年后仍可读，SQLite 仅作索引/缓存/历史
+- **纯 Rust 单二进制**：无 Python、无 subprocess、无构建链
+- **Obsidian 当 UI**：编辑/链接/标签/图谱/搜索全交 Obsidian，Compass 只做评分->衰减->浮现
+- **Agent 优先**：飞书 ws -> Agent -> compass skill -> Compass HTTP API（接入层均已有）
 
-**Compass（罗盘）** —— 让高价值内容自然浮现，让过时内容优雅衰减。
-
-不是"第二大脑"，不是知识仓库。是**认知操作系统**：帮你记住、排序、浮现最重要的知识。
-
----
-
-## 技术架构
+## 架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    接入层                              │
-│  飞书Bot · Obsidian · Agent API (OpenClaw Skill)    │
-└────────────────────┬────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│              compass-api (Python/FastAPI)             │
-│  REST API · CRUD · Graph · Search · Fetch · Decay    │
-└────────────────────┬────────────────────────────────┘
-                     │ FFI (ctypes)
-┌────────────────────▼────────────────────────────────┐
-│            compass-core (Rust)                        │
-│  评分引擎 · 衰减算法 · FTS5 · 引用解析                  │
-└─────────────────────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│              数据层                                   │
-│  Obsidian Vault (Markdown) + SQLite (索引/元数据)     │
-└─────────────────────────────────────────────────────┘
+用户 -> 飞书消息 -> 飞书 ws(已有) -> Agent(已有) -> compass skill(已有 CLI)
+                                                        │ HTTP JSON
+                                                        ▼
+                                               Compass HTTP API (Rust 二进制)
+                                               ├── axum HTTP server   /api/*
+                                               ├── FileWatcher (notify) 监听 vault
+                                               ├── ScoringEngine      评分/衰减/触发器
+                                               └── SQLite 索引         entities/FTS5
+                                                        │
+                                               返回 JSON -> skill render -> 飞书卡片
 ```
 
----
+## 快速开始
 
-## 快速导航
+### 前置
 
-| 文档 | 说明 |
-|------|------|
-| [docs/PRD_v2.1.md](docs/PRD_v2.1.md) | **产品需求文档 v2.3** — Phase 1-5 完整规划与状态 |
-| [docs/TDD.md](docs/TDD.md) | 测试驱动开发规范与测试地图 |
-| [OPENCLAW.md](OPENCLAW.md) | 架构决策 · 技术选型 · License |
-| [SKILL.md](SKILL.md) | OpenClaw Agent Skill 接口定义 |
-| [archive/](archive/) | 历史文档归档 |
+- Rust MSVC 工具链（`rustup default stable-x86_64-pc-windows-msvc`）
+- Obsidian + Dataview 插件 + Templater 插件
 
----
+### 构建
 
-## 开发生态
+```bash
+cd compass-core
+cargo build --release
+```
 
-### 技术栈
+### 配置
 
-| 层级 | 技术 |
-|------|------|
-| API | Python 3.11 · FastAPI · Pydantic v2 |
-| 核心引擎 | Rust (ctypes FFI) |
-| 数据库 | SQLite + FTS5 |
-| 索引存储 | Obsidian Vault (Markdown) |
-| Agent集成 | OpenClaw Skill (自然语言接口) |
-| 飞书 | Webhook 消息管道 |
+编辑 `compass-core/compass.toml`：
 
-### 目录结构
+```toml
+vault_path = "../vault"      # Obsidian vault 路径（相对配置文件）
+port = 8080                  # HTTP API 端口
+
+[weights]                    # 三维默认权重（sum=1.0）
+interest = 0.40
+strategy = 0.35
+consensus = 0.25
+
+[decay]                      # 衰减参数（只衰 interest）
+daily_rate = 0.98            # 每日衰减率
+floor = 0.5                  # 地板（防完全遗忘）
+boost_protection_days = 3    # boost 保护期
+direction_layer_factor = 0.5 # direction 层衰减减半
+```
+
+### 运行
+
+```bash
+cd compass-core
+cargo run --release
+```
+
+启动后：
+- 自动从 vault 全量重建索引
+- FileWatcher 监听 vault 变更（新建/修改/删除）
+- HTTP API 监听 `http://localhost:8080`
+
+## API 端点
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| GET | `/feed?mode=explore` | 浮现列表（按 composite 降序） |
+| GET | `/entities/top?layer=&limit=` | Top 评分实体 |
+| GET | `/entities/{id}` | 实体详情（含 `[[id]]` refs） |
+| GET | `/search?q=&limit=` | FTS5 搜索 |
+| POST | `/entities` | 创建实体（写 .md） |
+| PATCH | `/entities/{id}/score` | 手动调分（写回 frontmatter） |
+| PATCH | `/entities/{id}/access` | 记录访问（触发 boost） |
+
+## 评分模型
+
+### 三维评分
+
+| 维度 | 字段 | 语义 |
+|------|------|------|
+| 现在·兴趣 | `interest` | 当下热情所在 |
+| 未来·战略 | `strategy` | 面向未来的战略布局 |
+| 过去·共识 | `consensus` | 已验证的、基石性知识 |
+
+```
+composite = interest*0.40 + strategy*0.35 + consensus*0.25
+```
+
+### 衰减（只衰 interest）
+
+```
+new_interest = max(interest * 0.5, interest * 0.98 ^ days_inactive)
+```
+
+### 触发器
+
+| 触发条件 | 维度 | 调整 | 冷却 |
+|----------|------|------|------|
+| 被引用 | consensus | +2 | 1 天 |
+| 创建关联链接 | interest | +1 | 7 天 |
+| 添加案例 | strategy | +3 | - |
+| 手动标记重点 | interest | +10 | - |
+| 完成复习 | consensus | +2 | 7 天 |
+
+访问深度 boost：`glance` +0 / `read` +1 / `study` +3 / `apply` +2+5
+
+## Obsidian 集成
+
+- **Dataview**：读 `score.composite` 排序/表格（查询模板见 `docs/dataview-queries.md`）
+- **Templater**：用 `vault/Templates/` 下的模板新建笔记（含完整 score 骨架）
+- **无需插件**：分数写回 frontmatter，Obsidian/Dataview 自动反映
+
+## 目录结构
 
 ```
 Compass/
-├── compass-core/          # Rust 核心引擎
+├── compass-core/              # Rust 单二进制
 │   ├── src/
-│   │   ├── scoring.rs     # 三维评分引擎
-│   │   ├── decay.rs       # 半衰期衰减
-│   │   ├── search.rs      # FTS5 搜索
-│   │   └── reference.rs   # 引用解析
-│   └── Cargo.toml
-├── compass-api/           # Python FastAPI 层
-│   └── src/
-│       ├── api/           # 各模块端点
-│       ├── core/          # Rust 客户端封装
-│       ├── db/            # SQLite + FTS5
-│       └── services/      # FileWatcher 等
-├── docs/                  # PRD / TDD / 架构文档
-└── archive/               # 历史版本归档
+│   │   ├── main.rs            # 入口：配置 + DB + FileWatcher + API
+│   │   ├── config.rs          # compass.toml 加载
+│   │   ├── models.rs          # Score / Weights / Layer
+│   │   ├── scoring.rs         # 综合分 + 衰减 + 触发器
+│   │   ├── frontmatter.rs     # YAML 解析 + score 块替换 + 原子写
+│   │   ├── db.rs              # SQLite 索引层（entities/FTS5/history）
+│   │   ├── watcher.rs         # notify 文件监听
+│   │   ├── api.rs             # axum HTTP 路由
+│   │   └── e2e_tests.rs       # 端到端验收测试
+│   └── compass.toml           # 运行时配置
+├── vault/                     # Obsidian vault
+│   ├── Direction/             # 架构层
+│   ├── Knowledge/             # 内容层·理论原子
+│   ├── Cases/                 # 内容层·实践标本
+│   ├── Logs/                  # 日志层
+│   ├── Insights/              # 感悟层
+│   ├── Inbox/                 # 收集箱
+│   └── Templates/             # Templater 模板
+├── skills/compass/            # compass skill CLI（已有，Python）
+├── docs/                      # 文档
+│   ├── PRD_v3.0.md            # 实施规格
+│   ├── PLAN.md                # 开发计划
+│   ├── dataview-queries.md    # Dataview 查询模板
+│   └── REVIEW_*.md            # 各任务 review
+└── archive/                   # v2.x 归档
 ```
 
----
+## 开发状态
 
-## 开发阶段
+### Phase 1 · 核心闭环 ✅
 
-### ✅ Phase 1 — MVP (完成)
+- [x] T1.1 项目骨架（Cargo + config + /health）
+- [x] T1.2 frontmatter 读写（YAML 解析 + score 块替换 + 原子写 + 文件锁）
+- [x] T1.3 评分引擎（composite + 衰减 + 触发器 + 冷却）
+- [x] T1.4 SQLite 索引层（entities/score_history/timeline/FTS5 + rebuild）
+- [x] T1.5 FileWatcher（notify 监听 + 去抖 + 解析 + 索引 + 写回）
+- [x] T1.6 基础 API（7 端点 + main.rs 接线）
+- [x] T1.7 验收测试（端到端闭环）
+- [x] T1.8 文档与样例（Templater 模板 + README）
 
-| 模块 | 功能 | 状态 |
-|------|------|------|
-| Vault 结构 | 目录规范 + Frontmatter | ✅ |
-| 文件监听 | watchdog 实时同步 | ✅ |
-| 引用解析 | `[[id]]` 双向链接 | ✅ |
-| 三维评分 | interest / strategy / consensus | ✅ |
-| FastAPI | CRUD / query / feed / agent | ✅ |
-| OpenClaw Skill | 自然语言接口 | ✅ |
+### Phase 2 · 浮现与可视化（待开发）
 
-### ✅ Phase 2 — 后端扩展 (完成)
+衰减调度 + Feed 三模式 + 引力场 Web（HTMX+D3）
 
-| 模块 | 功能 | PR |
-|------|------|-----|
-| Schema Foundation | entity_type / status / maturity / taggings | #74 |
-| 实体列表 | 分页 + 过滤 + 搜索 | #72 |
-| 邻居查询 | Graph BFS / depth / min_strength | #75 #78 |
-| URL 抓取 | fetch → clean → vault 保存 | #76 #79 |
-| 混合搜索 | BM25 + FTS5 全文检索 | #77 |
-| Timeline | 访问记录 + 评分历史 | #81 |
-| Insights | 感悟 CRUD + maturity 状态机 | #82 |
-| Insight 演化 | 感悟成熟 → 知识升级 | #83 |
-| 引用强度 | 共同邻居推断强度 | #84 |
-| 双向引用 | 反向边自动维护 | #85 |
-| Decay 配置 | 半衰期个性化 | #68 #69 #70 |
-| 导出接口 | JSON / Markdown 导出 | #119 |
+### Phase 3 · Agent/Skill 对接（待开发）
 
-### ✅ Phase 3 — 自动能力增强 (完成)
+适配 skill 脚本 + 全链路验收
 
-| 模块 | 功能 | PR |
-|------|------|-----|
-| 自动标签 | 创建时自动提取标签 | #107 |
-| 标签推荐 | 智能标签推荐 + 批量更新 | #111 |
-| Maturity 状态机 | 实体成熟度三级演化 | #108 |
-| 演化规则引擎 | 可配置演化规则 | #114 |
-| 关联推荐 | 相似度混合打分 | #109 |
-| 自动关联 | 双向引用边自动创建 | #114 |
+## 测试
 
-### 🎨 Phase 4 — 前端与可视化 (待开发)
-
-| 模块 | 功能 | 依赖 |
-|------|------|------|
-| Vue3 骨架 | TypeScript + Vite + Pinia | — |
-| 实体列表页 | 分页 + 过滤 + 搜索 | P4-UI-1 |
-| 实体详情页 | Markdown 渲染 + 引用 | P4-UI-1 |
-| 评分面板 | 三维雷达图 + 历史曲线 | P4-UI-1 |
-| 图谱可视化 | D3.js Force-Directed | P2-Graph-1 |
-| Feed 信息流 | explore / consolidate / strategic | P2-Search-1 |
-| 搜索页面 | 语义搜索 + 高亮 | P2-Search-1 |
-| 时间线页面 | 访问 + 评分历史 | P2-Timeline-2 |
-| Insight 页面 | 成熟度状态机 | P2-Insight-2 |
-| 用户设置 | 权重 + Decay 配置 | P4-UI-1 |
-| PWA | SW + Manifest + 离线队列 | P4-UI-1 |
-| MCP Server | 3 Tool → 15 Tool | P2-Search-1 |
-
-**Phase 4 工时：84h（4-6 周）**
-
-### 🚀 Phase 5 — 部署与工程化 (待开发)
-
-| 模块 | 功能 | 依赖 |
-|------|------|------|
-| docker-compose | 一键部署 | P4-UI-1 |
-| Dockerfile | 容器化 | P5-Deploy-1 |
-| 监控面板 | 健康检查 + 指标 | P2-Search-1 |
-| 数据迁移 | 导入/导出工具 | P2-Entity-1 |
-
-**Phase 5 工时：35h（2-3 周）**
-
-### 🎨 Phase 4 — 前端与可视化 (待开发)
-
-| 模块 | 功能 | 依赖 |
-|------|------|------|
-| Vue3 骨架 | TypeScript + Vite + Pinia | — |
-| 实体列表页 | 分页 + 过滤 + 搜索 | P4-UI-1 |
-| 实体详情页 | Markdown 渲染 + 引用 | P4-UI-1 |
-| 评分面板 | 三维雷达图 + 历史曲线 | P4-UI-1 |
-| 图谱可视化 | D3.js Force-Directed | P2-Graph-1 |
-| Feed 信息流 | explore / consolidate / strategic | P2-Search-1 |
-| 搜索页面 | 语义搜索 + 高亮 | P2-Search-1 |
-| 时间线页面 | 访问 + 评分历史 | P2-Timeline-2 |
-| Insight 页面 | 成熟度状态机 | P2-Insight-2 |
-| 用户设置 | 权重 + Decay 配置 | P4-UI-1 |
-| PWA | SW + Manifest + 离线队列 | P4-UI-1 |
-| MCP Server | 3 Tool → 15 Tool | P2-Search-1 |
-
-**Phase 4 工时：84h（4-6 周）**
-
-### 🚀 Phase 5 — 部署与工程化 (待开发)
-
-| 模块 | 功能 | 依赖 |
-|------|------|------|
-| docker-compose | 一键部署 | P4-UI-1 |
-| Dockerfile | 容器化 | P5-Deploy-1 |
-| 监控面板 | 健康检查 + 指标 | P2-Search-1 |
-| 数据迁移 | 导入/导出工具 | P2-Entity-1 |
-
-**Phase 5 工时：35h（2-3 周）**
-
----
-
-## API 端点一览
-
-```
-GET    /entities                  实体列表（分页/过滤）
-POST   /entities                  创建实体
-GET    /entities/{id}             获取实体
-PUT    /entities/{id}             更新实体
-DELETE /entities/{id}             删除实体（级联清理）
-
-PATCH  /entities/{id}/access      访问记录（触发 decay）
-PATCH  /entities/{id}/score       手动评分
-
-GET    /entities/{id}/timeline    时间线（访问/评分历史）
-GET    /entities/{id}/score/history  评分趋势
-
-GET    /graph/neighbors/{id}       邻居查询
-GET    /graph/path/{from}/{to}    最短路径
-
-POST   /search                    混合搜索（BM25 + FTS5）
-POST   /fetch                     URL 抓取
-
-GET    /insights                  Insight 列表
-POST   /insights                  创建 Insight
-PATCH  /insights/{id}/maturity     成熟度演化
-
-PATCH  /decay/config              半衰期配置
-GET    /decay/preview             衰减预览
-GET    /decay/simulate            衰减模拟
-
-GET    /feed                      个性化推送
-GET    /feed/strategic            战略焦点
+```bash
+cd compass-core
+cargo test
 ```
 
----
-
-## 贡献指南
-
-### 分支模型
-
-```
-长期分支：
-  main     — 稳定可发布状态，始终等于最新正式版
-  dev      — 下一版本开发集成分支，所有 PR 的目标分支
-
-临时分支（从 dev 创建）：
-  feat/{issue-id}-{desc}
-  fix/{issue-id}-{desc}
-  docs/{issue-id}-{desc}   从 main 创建，PR → dev
-
-合并路径： feat/fix/docs → dev → main
-```
-
-### 流程规范
-
-```
-1. 创建 Issue（描述完整，包含验收标准）
-2. 从目标分支拉干净分支：
-   git checkout dev && git pull origin dev
-   git checkout -b feat/42-new-feature
-3. 开发 + 测试
-4. 提交 PR（包含：解决什么问题、怎么验证）
-5. Code Review（至少 1 人 Approve）
-6. PR → dev → main（功能/修复）
-7. 文档更新走单独 PR，基于 main 创建
-```
-
-### PR 规范
-
-- **Title**: `{type}: {简短描述}`
-- **Description** 必须包含：问题描述、验证方式、影响范围
-- **最小 PR 原则**：一个 PR 只解决一个问题
-- **Review 通过前禁止 self-merge**
-
----
+96 个测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / FTS5 / FileWatcher / API 7 端点 / 端到端闭环。
 
 ## License
 
-**Compass Open License (COL)**
-- 免费：个人 / 10人以内非商业团队
-- 付费：企业 / SaaS / 商业集成
-
-详见 [OPENCLAW.md](OPENCLAW.md)
+Compass Open License (COL) — 见 [OPENCLAW.md](OPENCLAW.md)

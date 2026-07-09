@@ -143,7 +143,7 @@ async fn process_events(
 }
 
 /// 处理单个文件
-async fn process_single_file(
+pub(crate) async fn process_single_file(
     vault: &Path,
     db: &Arc<Mutex<Db>>,
     weights: &Weights,
