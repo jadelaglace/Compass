@@ -59,6 +59,28 @@ pub struct EntityDetail {
     pub score: Option<ScoreResponse>,
     pub refs: Vec<String>,
 }
+/// 引力场节点
+#[derive(Debug, Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub title: Option<String>,
+    pub layer: Option<String>,
+    pub composite: Option<f64>,
+}
+
+/// 引力场边
+#[derive(Debug, Serialize)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+}
+
+/// 引力场数据（GET /graph）
+#[derive(Debug, Serialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct SearchHit {
@@ -134,6 +156,7 @@ pub fn router(state: AppState) -> Router {
         .route("/entities", post(create_entity))
         .route("/entities/:id/score", patch(update_score))
         .route("/entities/:id/access", patch(record_access))
+        .route("/graph", get(graph))
         .with_state(state)
 }
 
@@ -469,6 +492,38 @@ pub(crate) async fn record_access(
     })))
 }
 
+pub(crate) async fn graph(State(state): State<AppState>) -> Result<Json<GraphData>, AppError> {
+    let db = state.db.lock().await;
+    let entities = db.list_entities()?;
+
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    for entity in &entities {
+        nodes.push(GraphNode {
+            id: entity.id.clone(),
+            title: entity.title.clone(),
+            layer: entity.layer.clone(),
+            composite: entity.composite,
+        });
+
+        // 提取 [[id]] 引用作为边
+        let file_path = state.vault.join(&entity.file_path);
+        if let Ok(refs) = extract_refs(&file_path) {
+            for target in refs {
+                // 只添加指向已存在实体的边
+                if entities.iter().any(|e| e.id == target) {
+                    edges.push(GraphEdge {
+                        source: entity.id.clone(),
+                        target,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(Json(GraphData { nodes, edges }))
+}
 fn extract_refs(file_path: &std::path::Path) -> Result<Vec<String>, anyhow::Error> {
     let note = frontmatter::read_note(file_path)?;
     let re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
@@ -985,6 +1040,107 @@ mod tests {
         assert!((r.score.unwrap().composite - 50.0).abs() < 1e-9);
     }
 
+    #[tokio::test]
+    async fn test_graph_returns_nodes_and_edges() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let md_a = sample_md("know-a", "A", 80.0, "refs [[know-b]]");
+        fs::write(vault.join("know-a.md"), md_a).unwrap();
+        let md_b = sample_md("know-b", "B", 60.0, "no refs");
+        fs::write(vault.join("know-b.md"), md_b).unwrap();
+        let state = setup_state(&vault);
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-a".to_string(),
+                file_path: "know-a.md".to_string(),
+                title: Some("A".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(80.0),
+                strategy: Some(80.0),
+                consensus: Some(80.0),
+                composite: Some(80.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+                content_hash: Some("a".to_string()),
+                updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            "refs [[know-b]]",
+        )
+        .unwrap();
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-b".to_string(),
+                file_path: "know-b.md".to_string(),
+                title: Some("B".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(60.0),
+                strategy: Some(60.0),
+                consensus: Some(60.0),
+                composite: Some(60.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+                content_hash: Some("b".to_string()),
+                updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            "no refs",
+        )
+        .unwrap();
+        drop(db);
+        let result = graph(State(state)).await.unwrap().0;
+        assert_eq!(result.nodes.len(), 2);
+        assert_eq!(result.edges.len(), 1, "know-a -> know-b 一条边");
+        assert_eq!(result.edges[0].source, "know-a");
+        assert_eq!(result.edges[0].target, "know-b");
+    }
+
+    #[tokio::test]
+    async fn test_graph_no_edges_for_orphan_refs() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let md = sample_md("know-a", "A", 80.0, "refs [[know-ghost]]");
+        fs::write(vault.join("know-a.md"), md).unwrap();
+        let state = setup_state(&vault);
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-a".to_string(),
+                file_path: "know-a.md".to_string(),
+                title: Some("A".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(80.0),
+                strategy: Some(80.0),
+                consensus: Some(80.0),
+                composite: Some(80.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+                content_hash: Some("a".to_string()),
+                updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            "refs [[know-ghost]]",
+        )
+        .unwrap();
+        drop(db);
+        let result = graph(State(state)).await.unwrap().0;
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.edges.len(), 0, "指向不存在实体的引用不应产生边");
+    }
+
+    #[tokio::test]
+    async fn test_graph_empty_vault() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let state = setup_state(&vault);
+        let result = graph(State(state)).await.unwrap().0;
+        assert!(result.nodes.is_empty());
+        assert!(result.edges.is_empty());
+    }
     #[tokio::test]
     async fn test_search_hits() {
         let dir = tempdir().unwrap();
