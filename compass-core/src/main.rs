@@ -1,5 +1,5 @@
-//! Compass — 评分引力场引擎（纯 Rust 单二进制）。
-//! T1.1 骨架：加载配置 + 启动 axum /health。
+//! Compass - 评分引力场引擎（纯 Rust 单二进制）。
+//! T1.6：加载配置 + 初始化 DB + 启动 FileWatcher + axum API。
 
 mod api;
 mod config;
@@ -10,6 +10,7 @@ mod scoring;
 mod watcher;
 
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::info;
 
 #[tokio::main]
@@ -25,7 +26,31 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", cfg.port);
     info!(vault = %cfg.vault_path.display(), port = cfg.port, "Compass starting");
 
-    let app = api::router(Arc::new(cfg));
+    // 初始化 DB
+    let db_path = cfg
+        .db_path
+        .clone()
+        .unwrap_or_else(|| cfg.vault_path.join(".compass").join("index.db"));
+    let db = Arc::new(Mutex::new(db::Db::open(&db_path)?));
+    info!(db = %db_path.display(), "database opened");
+
+    // 全量重建索引
+    let stats = db.lock().await.rebuild_from_vault(&cfg.vault_path)?;
+    info!(
+        indexed = stats.indexed,
+        skipped = stats.skipped,
+        duplicates = stats.duplicates,
+        "rebuild complete"
+    );
+
+    // 启动 FileWatcher
+    let mut file_watcher =
+        watcher::FileWatcher::new(cfg.vault_path.clone(), db.clone(), cfg.weights.clone());
+    file_watcher.start().await?;
+    info!("FileWatcher started");
+
+    // 启动 HTTP API
+    let app = api::router_from_config(Arc::new(cfg), db);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(%addr, "listening");
     axum::serve(listener, app).await?;
