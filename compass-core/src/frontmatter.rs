@@ -24,7 +24,8 @@ pub struct Note {
 
 /// 读取 .md 文件，拆分 frontmatter 与正文。
 pub fn read_note(path: &Path) -> Result<Note> {
-    let content = fs::read_to_string(path).with_context(|| format!("读取文件失败 {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("读取文件失败 {}", path.display()))?;
     let (frontmatter, body) = split_frontmatter(&content)?;
     Ok(Note { frontmatter, body })
 }
@@ -265,7 +266,11 @@ mod tests {
         fs::write(&path, sample_md()).unwrap();
 
         let mut s = sample_score();
-        s.weights = Some(Weights { interest: 0.5, strategy: 0.3, consensus: 0.2 });
+        s.weights = Some(Weights {
+            interest: 0.5,
+            strategy: 0.3,
+            consensus: 0.2,
+        });
         write_score(&path, &s).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();

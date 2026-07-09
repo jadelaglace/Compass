@@ -1,4 +1,4 @@
-﻿//! Compass — 评分引力场引擎（纯 Rust 单二进制）。
+//! Compass — 评分引力场引擎（纯 Rust 单二进制）。
 //! T1.1 骨架：加载配置 + 启动 axum /health。
 
 mod api;
