@@ -73,11 +73,12 @@ impl Trigger {
 }
 
 /// 访问深度（PRD §5.3 访问深度 boost）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum AccessDepth {
     /// 浏览标题：interest +0，consensus +0.1
     Glance,
-    /// 完整阅读：interest +1，consensus +0.5
+    /// 完整阅读：interest +1，consensus +0.5（默认）
+    #[default]
     Read,
     /// 深度学习：interest +3，consensus +1
     Study,
