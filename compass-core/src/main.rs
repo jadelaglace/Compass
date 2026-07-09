@@ -64,7 +64,10 @@ async fn main() -> anyhow::Result<()> {
     decay_scheduler.start().await?;
 
     // 启动 HTTP API
-    let app = api::router_from_config(Arc::new(cfg), db);
+    // 接线静态文件 + 根路由
+    let web_dir = std::path::Path::new("web");
+    let app = api::router_from_config(Arc::new(cfg), db)
+        .fallback_service(tower_http::services::ServeDir::new(web_dir));
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(%addr, "listening");
     axum::serve(listener, app).await?;
