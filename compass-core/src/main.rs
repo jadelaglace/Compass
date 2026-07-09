@@ -4,6 +4,8 @@
 mod api;
 mod config;
 mod db;
+#[cfg(test)]
+mod e2e_tests;
 mod frontmatter;
 mod models;
 mod scoring;
