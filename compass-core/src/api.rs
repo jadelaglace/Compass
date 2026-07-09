@@ -35,6 +35,8 @@ pub struct EntitySummary {
     pub title: Option<String>,
     pub layer: Option<String>,
     pub composite: Option<f64>,
+    pub strategy: Option<f64>,
+    pub last_boosted_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,14 +158,36 @@ pub(crate) async fn feed(
             title: e.title,
             layer: e.layer,
             composite: e.composite,
+            strategy: e.strategy,
+            last_boosted_at: e.last_boosted_at,
         })
         .collect();
-    summaries.sort_by(|a, b| {
-        b.composite
-            .unwrap_or(0.0)
-            .partial_cmp(&a.composite.unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    match q.mode.as_str() {
+        "strategic" => {
+            summaries.sort_by(|a, b| {
+                b.strategy
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.strategy.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        "consolidate" => {
+            summaries.sort_by(|a, b| match (&a.last_boosted_at, &b.last_boosted_at) {
+                (Some(a), Some(b)) => a.cmp(b),
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (None, None) => std::cmp::Ordering::Equal,
+            });
+        }
+        _ => {
+            summaries.sort_by(|a, b| {
+                b.composite
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.composite.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
     summaries.truncate(q.limit as usize);
     Ok(Json(summaries))
 }
@@ -186,6 +210,8 @@ pub(crate) async fn entities_top(
             title: e.title,
             layer: e.layer,
             composite: e.composite,
+            strategy: e.strategy,
+            last_boosted_at: e.last_boosted_at,
         })
         .collect();
     summaries.sort_by(|a, b| {
@@ -688,6 +714,217 @@ mod tests {
         assert_eq!(r[0].id, "know000001");
     }
 
+    #[tokio::test]
+    async fn test_feed_strategic_mode() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-a".to_string(),
+                file_path: "a.md".to_string(),
+                title: Some("A".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(90.0),
+                strategy: Some(30.0),
+                consensus: Some(50.0),
+                composite: Some(70.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+                content_hash: Some("a".to_string()),
+                updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            "body a",
+        )
+        .unwrap();
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-b".to_string(),
+                file_path: "b.md".to_string(),
+                title: Some("B".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(30.0),
+                strategy: Some(95.0),
+                consensus: Some(50.0),
+                composite: Some(50.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+                content_hash: Some("b".to_string()),
+                updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            "body b",
+        )
+        .unwrap();
+        drop(db);
+        let q = FeedQuery {
+            mode: "strategic".to_string(),
+            limit: 10,
+        };
+        let r = feed(State(state), Query(q)).await.unwrap().0;
+        assert_eq!(r[0].id, "know-b", "strategic 按 strategy 降序");
+        assert_eq!(r[1].id, "know-a");
+    }
+
+    #[tokio::test]
+    async fn test_feed_consolidate_mode() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-old".to_string(),
+                file_path: "a.md".to_string(),
+                title: Some("Old".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(50.0),
+                strategy: Some(50.0),
+                consensus: Some(50.0),
+                composite: Some(50.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-01-01T00:00:00Z".to_string()),
+                content_hash: Some("a".to_string()),
+                updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+            },
+            "body a",
+        )
+        .unwrap();
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-recent".to_string(),
+                file_path: "b.md".to_string(),
+                title: Some("Recent".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(50.0),
+                strategy: Some(50.0),
+                consensus: Some(50.0),
+                composite: Some(50.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-08T00:00:00Z".to_string()),
+                content_hash: Some("b".to_string()),
+                updated_at: Some("2026-07-08T00:00:00Z".to_string()),
+            },
+            "body b",
+        )
+        .unwrap();
+        drop(db);
+        let q = FeedQuery {
+            mode: "consolidate".to_string(),
+            limit: 10,
+        };
+        let r = feed(State(state), Query(q)).await.unwrap().0;
+        assert_eq!(r[0].id, "know-old", "consolidate 按 last_boosted_at 升序");
+        assert_eq!(r[1].id, "know-recent");
+    }
+
+    #[tokio::test]
+    async fn test_feed_consolidate_null_first() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-null".to_string(),
+                file_path: "a.md".to_string(),
+                title: Some("Null".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(50.0),
+                strategy: Some(50.0),
+                consensus: Some(50.0),
+                composite: Some(50.0),
+                access_count: 0,
+                last_boosted_at: None,
+                content_hash: Some("a".to_string()),
+                updated_at: None,
+            },
+            "body a",
+        )
+        .unwrap();
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-has".to_string(),
+                file_path: "b.md".to_string(),
+                title: Some("Has".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(50.0),
+                strategy: Some(50.0),
+                consensus: Some(50.0),
+                composite: Some(50.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-01T00:00:00Z".to_string()),
+                content_hash: Some("b".to_string()),
+                updated_at: Some("2026-07-01T00:00:00Z".to_string()),
+            },
+            "body b",
+        )
+        .unwrap();
+        drop(db);
+        let q = FeedQuery {
+            mode: "consolidate".to_string(),
+            limit: 10,
+        };
+        let r = feed(State(state), Query(q)).await.unwrap().0;
+        assert_eq!(r[0].id, "know-null", "NULL last_boosted_at 排最前");
+        assert_eq!(r[1].id, "know-has");
+    }
+
+    #[tokio::test]
+    async fn test_feed_explore_default() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-low".to_string(),
+                file_path: "a.md".to_string(),
+                title: Some("Low".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(30.0),
+                strategy: Some(30.0),
+                consensus: Some(30.0),
+                composite: Some(30.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+                content_hash: Some("a".to_string()),
+                updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            "body a",
+        )
+        .unwrap();
+        db.upsert_entity(
+            &EntityRow {
+                id: "know-high".to_string(),
+                file_path: "b.md".to_string(),
+                title: Some("High".to_string()),
+                layer: Some("knowledge".to_string()),
+                status: Some("active".to_string()),
+                interest: Some(90.0),
+                strategy: Some(90.0),
+                consensus: Some(90.0),
+                composite: Some(90.0),
+                access_count: 0,
+                last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+                content_hash: Some("b".to_string()),
+                updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            "body b",
+        )
+        .unwrap();
+        drop(db);
+        let q = FeedQuery {
+            mode: "explore".to_string(),
+            limit: 10,
+        };
+        let r = feed(State(state), Query(q)).await.unwrap().0;
+        assert_eq!(r[0].id, "know-high", "explore 按 composite 降序");
+        assert_eq!(r[1].id, "know-low");
+    }
     #[tokio::test]
     async fn test_entities_top_layer_filter() {
         let dir = tempdir().unwrap();
