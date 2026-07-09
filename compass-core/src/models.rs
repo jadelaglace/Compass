@@ -1,4 +1,4 @@
-﻿//! 共享数据结构。
+//! 共享数据结构。
 
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,11 @@ impl Weights {
 
 impl Default for Weights {
     fn default() -> Self {
-        Self { interest: 0.40, strategy: 0.35, consensus: 0.25 }
+        Self {
+            interest: 0.40,
+            strategy: 0.35,
+            consensus: 0.25,
+        }
     }
 }
 
