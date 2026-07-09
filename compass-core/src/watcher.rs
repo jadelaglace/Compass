@@ -77,7 +77,7 @@ impl FileWatcher {
         // 处理事件（去抖）
         let vault = self.vault.clone();
         let db = self.db.clone();
-        let weights = self.weights.clone();
+        let weights = self.weights;
 
         tokio::spawn(async move {
             let mut last_events: HashSet<PathBuf> = HashSet::new();
@@ -186,7 +186,7 @@ pub(crate) async fn process_single_file(
         Some(score) => {
             // 已有 score，重算 composite（确保一致性）
             let composite =
-                scoring::composite(score.interest, score.strategy, score.consensus, &weights);
+                scoring::composite(score.interest, score.strategy, score.consensus, weights);
             Score {
                 interest: score.interest,
                 strategy: score.strategy,
@@ -213,7 +213,7 @@ pub(crate) async fn process_single_file(
                 strategy: DEFAULT_STRATEGY,
                 consensus: DEFAULT_CONSENSUS,
                 composite,
-                weights: Some(weights.clone()),
+                weights: Some(*weights),
                 updated_at: now.clone(),
                 last_boosted_at: now,
                 access_count: 0,
@@ -388,7 +388,7 @@ fn extract_id_from_path(vault: &Path, path: &Path) -> Option<String> {
 fn extract_id_from_frontmatter(frontmatter: &str) -> Option<String> {
     let fm: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
     let m = fm.as_mapping()?;
-    m.get(&serde_yaml::Value::String("id".into()))
+    m.get(serde_yaml::Value::String("id".into()))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -397,7 +397,7 @@ fn extract_id_from_frontmatter(frontmatter: &str) -> Option<String> {
 fn extract_title(frontmatter: &str) -> Option<String> {
     let fm: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
     let m = fm.as_mapping()?;
-    m.get(&serde_yaml::Value::String("title".into()))
+    m.get(serde_yaml::Value::String("title".into()))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -406,7 +406,7 @@ fn extract_title(frontmatter: &str) -> Option<String> {
 fn extract_layer(frontmatter: &str) -> Option<String> {
     let fm: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
     let m = fm.as_mapping()?;
-    m.get(&serde_yaml::Value::String("layer".into()))
+    m.get(serde_yaml::Value::String("layer".into()))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -415,7 +415,7 @@ fn extract_layer(frontmatter: &str) -> Option<String> {
 fn extract_status(frontmatter: &str) -> Option<String> {
     let fm: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
     let m = fm.as_mapping()?;
-    m.get(&serde_yaml::Value::String("status".into()))
+    m.get(serde_yaml::Value::String("status".into()))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }

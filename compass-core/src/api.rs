@@ -18,7 +18,7 @@ use tracing::{debug, info};
 use crate::config::Config;
 use crate::db::{Db, EntityRow};
 use crate::frontmatter;
-use crate::models::{Score, Weights};
+use crate::models::Weights;
 use crate::scoring;
 
 /// 共享应用状态
@@ -310,16 +310,6 @@ pub(crate) async fn create_entity(
     let consensus = req.consensus.unwrap_or(5.0);
     let composite = scoring::composite(interest, strategy, consensus, &state.weights);
     let now = chrono::Utc::now().to_rfc3339();
-    let score = Score {
-        interest,
-        strategy,
-        consensus,
-        composite,
-        weights: Some(state.weights.clone()),
-        updated_at: now.clone(),
-        last_boosted_at: now.clone(),
-        access_count: 0,
-    };
     let content = req.content.unwrap_or_default();
     let md = format!(
         "---\nid: {id}\ntitle: {}\nlayer: {}\nstatus: active\nscore:\n  interest: {interest}\n  strategy: {strategy}\n  consensus: {consensus}\n  composite: {composite}\n  weights:\n    interest: {}\n    strategy: {}\n    consensus: {}\n  updated_at: '{now}'\n  last_boosted_at: '{now}'\n  access_count: 0\n---\n{content}\n",
@@ -632,7 +622,7 @@ pub fn router_from_config(cfg: Arc<Config>, db: Arc<Mutex<Db>>) -> Router {
     let state = AppState {
         db,
         vault: cfg.vault_path.clone(),
-        weights: cfg.weights.clone(),
+        weights: cfg.weights,
     };
     router(state)
 }

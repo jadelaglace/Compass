@@ -32,17 +32,6 @@ impl Default for Weights {
     }
 }
 
-/// 实体层级（三大界）。
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Layer {
-    Direction,
-    Knowledge,
-    Case,
-    Log,
-    Insight,
-}
-
 /// frontmatter 中的 score 块（Compass 写回，Dataview 可读）。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Score {
