@@ -526,12 +526,7 @@ pub(crate) async fn graph(State(state): State<AppState>) -> Result<Json<GraphDat
 }
 fn extract_refs(file_path: &std::path::Path) -> Result<Vec<String>, anyhow::Error> {
     let note = frontmatter::read_note(file_path)?;
-    let re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
-    let refs: Vec<String> = re
-        .captures_iter(&note.body)
-        .map(|c| c.get(1).unwrap().as_str().to_string())
-        .collect();
-    Ok(refs)
+    Ok(frontmatter::extract_refs(&note.body))
 }
 
 fn layer_prefix(layer: &str) -> &str {

@@ -155,6 +155,14 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// ????? `[[id]]` wiki-link ?????? watcher ???? /graph ????
+pub fn extract_refs(body: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
+    re.captures_iter(body)
+        .map(|c| c.get(1).unwrap().as_str().to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
