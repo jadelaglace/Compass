@@ -183,7 +183,7 @@ cd compass-core
 cargo test
 ```
 
-96 个测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / FTS5 / FileWatcher / API 7 端点 / 端到端闭环。
+115 个测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / FTS5 / FileWatcher / API 7 端点 / 端到端闭环。
 
 ## License
 

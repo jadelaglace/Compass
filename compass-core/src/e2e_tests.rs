@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use crate::api::{
     self, AccessRequest, AppState, CreateEntityRequest, FeedQuery, ScoreUpdateRequest,
 };
-use crate::db::Db;
+use crate::db::{Db, EntityRow};
 use crate::frontmatter;
 use crate::models::Weights;
 use crate::watcher;
@@ -277,4 +277,226 @@ async fn test_e2e_search_after_create() {
     .0;
     assert_eq!(hits.len(), 1);
     assert!(hits[0].snippet.as_deref().unwrap_or("").contains("nash"));
+}
+
+// ============ T2.5 Phase 2 验收 ============
+
+/// 30天衰减曲线：验证衰减随天数递增而下降，且方向一致
+#[tokio::test]
+async fn test_p2_decay_curve_30_days() {
+    use crate::config::DecayConfig;
+    use crate::scheduler::DecayScheduler;
+
+    let dir = tempdir().unwrap();
+    let vault = dir.path().join("vault");
+    fs::create_dir_all(&vault).unwrap();
+    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+    let weights = Weights::default();
+    let decay = DecayConfig {
+        daily_rate: 0.98,
+        floor: 0.5,
+        boost_protection_days: 3,
+        direction_layer_factor: 0.5,
+    };
+    let scheduler = DecayScheduler::new(db.clone(), vault.clone(), weights, decay);
+
+    // 创建 5 个实体，last_boosted 分别 10/20/30/60/100 天前
+    let now = chrono::Utc::now();
+    for (i, days_ago) in [10i64, 20, 30, 60, 100].iter().enumerate() {
+        let last = now - chrono::Duration::days(*days_ago);
+        let id = format!("know-{i}");
+        let md = format!(
+            "---\nid: {id}\ntitle: T\nlayer: knowledge\nstatus: active\nscore:\n  interest: 90.0\n  strategy: 50.0\n  consensus: 50.0\n  composite: 70.0\n  updated_at: '{}'\n  last_boosted_at: '{}'\n  access_count: 0\n---\nbody\n",
+            last.to_rfc3339(), last.to_rfc3339()
+        );
+        fs::write(vault.join(format!("{id}.md")), md).unwrap();
+        let entity = EntityRow {
+            id: id.clone(),
+            file_path: format!("{id}.md"),
+            title: Some("T".to_string()),
+            layer: Some("knowledge".to_string()),
+            status: Some("active".to_string()),
+            interest: Some(90.0),
+            strategy: Some(50.0),
+            consensus: Some(50.0),
+            composite: Some(70.0),
+            access_count: 0,
+            last_boosted_at: Some(last.to_rfc3339()),
+            content_hash: Some("abc".to_string()),
+            updated_at: Some(last.to_rfc3339()),
+        };
+        db.lock().await.upsert_entity(&entity, "body").unwrap();
+    }
+
+    let result = scheduler.run_once().await.unwrap();
+    assert!(result.decayed >= 4, "至少4个应衰减（100天的可能到地板）");
+
+    // 验证衰减曲线：天数越大，interest 下降越多
+    let db_guard = db.lock().await;
+    let mut prev_interest = 100.0;
+    for i in 0..5 {
+        let entity = db_guard.get_entity(&format!("know-{i}")).unwrap().unwrap();
+        let interest = entity.interest.unwrap();
+        // 衰减天数越大，interest 越低（单调递减）
+        assert!(
+            interest <= prev_interest + 1e-6,
+            "know-{i} interest={interest} 应 <= prev={prev_interest}（衰减曲线单调递减）"
+        );
+        prev_interest = interest;
+    }
+
+    // 100天的应到地板附近（90*0.5=45）
+    let entity_100 = db_guard.get_entity("know-4").unwrap().unwrap();
+    let interest_100 = entity_100.interest.unwrap();
+    assert!(
+        interest_100 <= 46.0,
+        "100天衰减应接近地板45，实际 {interest_100}"
+    );
+}
+
+/// Feed 三模式端到端：explore/consolidate/strategic 排序正确
+#[tokio::test]
+async fn test_p2_feed_three_modes_e2e() {
+    use crate::api;
+
+    let dir = tempdir().unwrap();
+    let vault = dir.path().join("vault");
+    fs::create_dir_all(&vault).unwrap();
+    let state = api::AppState {
+        db: Arc::new(Mutex::new(Db::open_in_memory().unwrap())),
+        vault: vault.clone(),
+        weights: Weights::default(),
+    };
+
+    // know-a: composite高 strategy低 last_boosted久
+    // know-b: composite中 strategy高 last_boosted最近
+    // know-c: composite低 strategy中 last_boosted最久
+    let entities = vec![
+        ("know-a", 80.0, 30.0, "2026-01-01T00:00:00Z"),
+        ("know-b", 60.0, 90.0, "2026-07-08T00:00:00Z"),
+        ("know-c", 40.0, 50.0, "2025-12-01T00:00:00Z"),
+    ];
+
+    for (id, comp, strat, boosted) in &entities {
+        let entity = EntityRow {
+            id: id.to_string(),
+            file_path: format!("{id}.md"),
+            title: Some(id.to_string()),
+            layer: Some("knowledge".to_string()),
+            status: Some("active".to_string()),
+            interest: Some(50.0),
+            strategy: Some(*strat),
+            consensus: Some(50.0),
+            composite: Some(*comp),
+            access_count: 0,
+            last_boosted_at: Some(boosted.to_string()),
+            content_hash: Some("abc".to_string()),
+            updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+        };
+        state
+            .db
+            .lock()
+            .await
+            .upsert_entity(&entity, "body")
+            .unwrap();
+    }
+
+    // explore: composite 降序 -> a(80) b(60) c(40)
+    let q = api::FeedQuery {
+        mode: "explore".to_string(),
+        limit: 10,
+    };
+    let r = api::feed(axum::extract::State(state.clone()), axum::extract::Query(q))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r[0].id, "know-a");
+    assert_eq!(r[1].id, "know-b");
+    assert_eq!(r[2].id, "know-c");
+
+    // strategic: strategy 降序 -> b(90) c(50) a(30)
+    let q = api::FeedQuery {
+        mode: "strategic".to_string(),
+        limit: 10,
+    };
+    let r = api::feed(axum::extract::State(state.clone()), axum::extract::Query(q))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r[0].id, "know-b");
+    assert_eq!(r[1].id, "know-c");
+    assert_eq!(r[2].id, "know-a");
+
+    // consolidate: last_boosted 升序 -> c(2025-12) a(2026-01) b(2026-07)
+    let q = api::FeedQuery {
+        mode: "consolidate".to_string(),
+        limit: 10,
+    };
+    let r = api::feed(axum::extract::State(state.clone()), axum::extract::Query(q))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r[0].id, "know-c");
+    assert_eq!(r[1].id, "know-a");
+    assert_eq!(r[2].id, "know-b");
+}
+
+/// Graph 节点大小=composite：验证 /graph 返回的节点含 composite 字段
+#[tokio::test]
+async fn test_p2_graph_node_size_equals_score() {
+    use crate::api;
+
+    let dir = tempdir().unwrap();
+    let vault = dir.path().join("vault");
+    fs::create_dir_all(&vault).unwrap();
+    let state = api::AppState {
+        db: Arc::new(Mutex::new(Db::open_in_memory().unwrap())),
+        vault: vault.clone(),
+        weights: Weights::default(),
+    };
+
+    // 两个实体：高分 + 低分
+    let high = EntityRow {
+        id: "know-high".to_string(),
+        file_path: "high.md".to_string(),
+        title: Some("High".to_string()),
+        layer: Some("knowledge".to_string()),
+        status: Some("active".to_string()),
+        interest: Some(90.0),
+        strategy: Some(90.0),
+        consensus: Some(90.0),
+        composite: Some(90.0),
+        access_count: 0,
+        last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+        content_hash: Some("h".to_string()),
+        updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+    };
+    let low = EntityRow {
+        id: "know-low".to_string(),
+        file_path: "low.md".to_string(),
+        title: Some("Low".to_string()),
+        layer: Some("knowledge".to_string()),
+        status: Some("active".to_string()),
+        interest: Some(10.0),
+        strategy: Some(10.0),
+        consensus: Some(10.0),
+        composite: Some(10.0),
+        access_count: 0,
+        last_boosted_at: Some("2026-07-09T00:00:00Z".to_string()),
+        content_hash: Some("l".to_string()),
+        updated_at: Some("2026-07-09T00:00:00Z".to_string()),
+    };
+    state.db.lock().await.upsert_entity(&high, "body").unwrap();
+    state.db.lock().await.upsert_entity(&low, "body").unwrap();
+
+    let result = api::graph(axum::extract::State(state)).await.unwrap().0;
+    assert_eq!(result.nodes.len(), 2);
+
+    // 验证节点含 composite 字段（Web D3 用它定节点大小）
+    let high_node = result.nodes.iter().find(|n| n.id == "know-high").unwrap();
+    let low_node = result.nodes.iter().find(|n| n.id == "know-low").unwrap();
+    assert!((high_node.composite.unwrap() - 90.0).abs() < 1e-9);
+    assert!((low_node.composite.unwrap() - 10.0).abs() < 1e-9);
+    // 高分节点 composite > 低分节点（D3 会渲染更大）
+    assert!(high_node.composite.unwrap() > low_node.composite.unwrap());
 }
