@@ -170,7 +170,9 @@ fn clamp_score(v: f64) -> f64 {
 mod tests {
     use super::*;
 
-    fn w() -> Weights { Weights::default() }
+    fn w() -> Weights {
+        Weights::default()
+    }
 
     fn base_score() -> Score {
         Score {
@@ -201,7 +203,11 @@ mod tests {
 
     #[test]
     fn test_composite_custom_weights_override() {
-        let w = Weights { interest: 0.5, strategy: 0.3, consensus: 0.2 };
+        let w = Weights {
+            interest: 0.5,
+            strategy: 0.3,
+            consensus: 0.2,
+        };
         assert!(w.is_normalized());
         let c = composite(8.0, 0.0, 0.0, &w);
         assert!((c - 4.0).abs() < 1e-6);
@@ -209,7 +215,11 @@ mod tests {
 
     #[test]
     fn test_composite_clamps_overflow() {
-        let w = Weights { interest: 0.5, strategy: 0.5, consensus: 0.5 };
+        let w = Weights {
+            interest: 0.5,
+            strategy: 0.5,
+            consensus: 0.5,
+        };
         let c = composite(100.0, 100.0, 100.0, &w);
         assert!((c - 100.0).abs() < 1e-6);
     }
@@ -247,7 +257,12 @@ mod tests {
     #[test]
     fn test_weights_is_normalized_detects_bad() {
         assert!(Weights::default().is_normalized());
-        assert!(!Weights { interest: 0.5, strategy: 0.5, consensus: 0.5 }.is_normalized());
+        assert!(!Weights {
+            interest: 0.5,
+            strategy: 0.5,
+            consensus: 0.5
+        }
+        .is_normalized());
     }
 
     // ---- T1.3 触发器 deltas / 冷却 ----
@@ -314,7 +329,11 @@ mod tests {
     #[test]
     fn test_apply_trigger_preserves_and_uses_custom_weights() {
         let mut s = base_score();
-        s.weights = Some(Weights { interest: 0.5, strategy: 0.3, consensus: 0.2 });
+        s.weights = Some(Weights {
+            interest: 0.5,
+            strategy: 0.3,
+            consensus: 0.2,
+        });
         let s = apply_trigger(&s, Trigger::Linked, "2026-07-06T00:00:00Z");
         // interest +1 = 6；composite 用自定义权重：6*0.5+5*0.3+5*0.2 = 3+1.5+1 = 5.5
         assert!((s.interest - 6.0).abs() < 1e-9);
@@ -388,14 +407,26 @@ mod tests {
     #[test]
     fn test_eligible_in_cooldown_returns_none() {
         // Cited 冷却 1 天；last 12h 前 → 冷却，None
-        let r = apply_trigger_if_eligible(&base_score(), Trigger::Cited, "2026-07-06T00:00:00Z", Some("2026-07-05T12:00:00Z")).unwrap();
+        let r = apply_trigger_if_eligible(
+            &base_score(),
+            Trigger::Cited,
+            "2026-07-06T00:00:00Z",
+            Some("2026-07-05T12:00:00Z"),
+        )
+        .unwrap();
         assert!(r.is_none());
     }
 
     #[test]
     fn test_eligible_expired_applies() {
         // last 2 天前，冷却 1 天 → 过冷却，apply
-        let r = apply_trigger_if_eligible(&base_score(), Trigger::Cited, "2026-07-06T00:00:00Z", Some("2026-07-04T00:00:00Z")).unwrap();
+        let r = apply_trigger_if_eligible(
+            &base_score(),
+            Trigger::Cited,
+            "2026-07-06T00:00:00Z",
+            Some("2026-07-04T00:00:00Z"),
+        )
+        .unwrap();
         let s = r.unwrap();
         assert!((s.consensus - 7.0).abs() < 1e-9);
     }
@@ -403,14 +434,22 @@ mod tests {
     #[test]
     fn test_eligible_no_cooldown_type_always_applies() {
         // ManualMark 无冷却，即使 last 提供也 apply
-        let r = apply_trigger_if_eligible(&base_score(), Trigger::ManualMark, "2026-07-06T00:00:00Z", Some("2026-07-05T00:00:00Z")).unwrap();
+        let r = apply_trigger_if_eligible(
+            &base_score(),
+            Trigger::ManualMark,
+            "2026-07-06T00:00:00Z",
+            Some("2026-07-05T00:00:00Z"),
+        )
+        .unwrap();
         assert!(r.is_some());
     }
 
     #[test]
     fn test_eligible_never_triggered_applies() {
         // last_for_type None → apply
-        let r = apply_trigger_if_eligible(&base_score(), Trigger::Cited, "2026-07-06T00:00:00Z", None).unwrap();
+        let r =
+            apply_trigger_if_eligible(&base_score(), Trigger::Cited, "2026-07-06T00:00:00Z", None)
+                .unwrap();
         assert!(r.is_some());
     }
 
