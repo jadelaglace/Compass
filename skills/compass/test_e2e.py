@@ -52,6 +52,18 @@ def compass_cli(*args, env=None):
     return result.stdout, result.stderr, result.returncode
 
 
+def compass_render_stdin(raw, action, env):
+    result = subprocess.run(
+        [sys.executable, COMPASS_SCRIPT, "render", f"action={action}"],
+        input=raw,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+    )
+    return result.stdout, result.stderr, result.returncode
+
+
 class TestE2ESkillAgainstApi(unittest.TestCase):
     server_proc = None
     tmpdir = None
@@ -244,6 +256,13 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["id"], "know-000001")
 
+    def test_top_category_alias(self):
+        raw, err, rc = compass_cli("top", "limit=5", "category=direction", env=self.env)
+        self.assertEqual(rc, 0, f"top category alias failed: {err}")
+        data = json.loads(raw)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["id"], "dir-000001")
+
     def test_get_and_render(self):
         raw, err, rc = compass_cli("get", "id=know-000001", env=self.env)
         self.assertEqual(rc, 0, f"get failed: {err}")
@@ -269,6 +288,25 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
         )
         self.assertEqual(rc, 0, f"render failed: {err}")
         self.assertIn("今日焦点", rendered)
+
+    def test_feed_all_modes(self):
+        expected_first = {
+            "explore": "dir-000001",
+            "strategic": "dir-000001",
+        }
+        for mode in ("explore", "consolidate", "strategic"):
+            raw, err, rc = compass_cli("feed", "limit=5", f"mode={mode}", env=self.env)
+            self.assertEqual(rc, 0, f"feed {mode} failed: {err}")
+            data = json.loads(raw)
+            self.assertGreaterEqual(len(data), 2)
+            if mode in expected_first:
+                self.assertEqual(data[0]["id"], expected_first[mode])
+
+            rendered, err, rc = compass_cli(
+                "render", f"raw={raw}", "action=feed", env=self.env
+            )
+            self.assertEqual(rc, 0, f"render feed {mode} failed: {err}")
+            self.assertIn("今日焦点", rendered)
 
     def test_context_and_render(self):
         raw, err, rc = compass_cli(
@@ -337,6 +375,55 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertIn("访问已记录", rendered)
+
+    def test_access_depths_and_invalid_depth(self):
+        raw, err, rc = compass_cli(
+            "create",
+            "title=Depth Test",
+            "layer=knowledge",
+            "content=access depth coverage",
+            "interest=10",
+            "strategy=20",
+            "consensus=30",
+            env=self.env,
+        )
+        self.assertEqual(rc, 0, f"create failed: {err}")
+        data = json.loads(raw)
+        entity_id = data["id"]
+        self.created_files.append(os.path.join(self.vault, data["file_path"]))
+
+        expected = {
+            "glance": (10.0, 20.0, 30.1, 1),
+            "read": (11.0, 20.0, 30.6, 2),
+            "study": (14.0, 20.0, 31.6, 3),
+            "apply": (16.0, 25.0, 33.6, 4),
+        }
+        for depth, (interest, strategy, consensus, count) in expected.items():
+            raw, err, rc = compass_cli(
+                "access", f"id={entity_id}", f"depth={depth}", env=self.env
+            )
+            self.assertEqual(rc, 0, f"access {depth} failed: {err}")
+            score = json.loads(raw)["score"]
+            self.assertAlmostEqual(score["interest"], interest, places=6)
+            self.assertAlmostEqual(score["strategy"], strategy, places=6)
+            self.assertAlmostEqual(score["consensus"], consensus, places=6)
+            self.assertEqual(score["access_count"], count)
+
+        _, err, rc = compass_cli(
+            "access", f"id={entity_id}", "depth=invalid", env=self.env
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("invalid", err.lower())
+
+    def test_render_stdin(self):
+        raw = json.dumps(
+            [{"id": "know-000001", "title": "Nash", "composite": 81.0}],
+            ensure_ascii=False,
+        )
+        rendered, err, rc = compass_render_stdin(raw, "search", self.env)
+        self.assertEqual(rc, 0, f"stdin render failed: {err}")
+        self.assertIn("Nash", rendered)
+        self.assertIn("81.0", rendered)
 
     def test_get_not_found(self):
         out, err, rc = compass_cli("get", "id=nonexistent", env=self.env)
