@@ -87,6 +87,8 @@ pub struct SearchHit {
     pub id: String,
     pub title: Option<String>,
     pub snippet: Option<String>,
+    pub layer: Option<String>,
+    pub composite: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,10 +312,21 @@ pub(crate) async fn search(
     let hits = db.fts_search(&q.q, q.limit)?;
     let results: Vec<SearchHit> = hits
         .into_iter()
-        .map(|h| SearchHit {
-            id: h.id,
-            title: h.title,
-            snippet: h.snippet,
+        .map(|h| {
+            // 补充 composite/layer 供 skill render 显示评分与分类
+            let (layer, composite) = db
+                .get_entity(&h.id)
+                .ok()
+                .flatten()
+                .map(|e| (e.layer, e.composite))
+                .unwrap_or((None, None));
+            SearchHit {
+                id: h.id,
+                title: h.title,
+                snippet: h.snippet,
+                layer,
+                composite,
+            }
         })
         .collect();
     Ok(Json(results))
@@ -1214,6 +1227,14 @@ mod tests {
         let r = search(State(state), Query(q)).await.unwrap().0;
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, "know000001");
+        assert_eq!(r[0].layer.as_deref(), Some("knowledge"));
+        assert!((r[0].composite.unwrap() - 80.0).abs() < 1e-9);
+        assert!(r[0]
+            .snippet
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("nash"));
     }
 
     #[tokio::test]

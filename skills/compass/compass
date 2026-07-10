@@ -55,7 +55,7 @@ def http_get(path: str, params: dict | None = None) -> dict:
         body = e.read().decode(errors="replace")
         try:
             err_body = json.loads(body)
-            print(json.dumps({"error": err_body.get("detail", body), "status": e.code}), file=sys.stderr)
+            print(json.dumps({"error": err_body.get("error", body), "status": e.code}), file=sys.stderr)
         except Exception:
             print(json.dumps({"error": body or e.reason, "status": e.code}), file=sys.stderr)
         sys.exit(1)
@@ -77,7 +77,7 @@ def http_patch(path: str, data: dict) -> dict:
         body = e.read().decode(errors="replace")
         try:
             err_body = json.loads(body)
-            print(json.dumps({"error": err_body.get("detail", body), "status": e.code}), file=sys.stderr)
+            print(json.dumps({"error": err_body.get("error", body), "status": e.code}), file=sys.stderr)
         except Exception:
             print(json.dumps({"error": body or e.reason, "status": e.code}), file=sys.stderr)
         sys.exit(1)
@@ -99,7 +99,7 @@ def http_post(path: str, data: dict) -> dict:
         body = e.read().decode(errors="replace")
         try:
             err_body = json.loads(body)
-            print(json.dumps({"error": err_body.get("detail", body), "status": e.code}), file=sys.stderr)
+            print(json.dumps({"error": err_body.get("error", body), "status": e.code}), file=sys.stderr)
         except Exception:
             print(json.dumps({"error": body or e.reason, "status": e.code}), file=sys.stderr)
         sys.exit(1)
@@ -205,79 +205,106 @@ def action_access(params: dict) -> None:
     print(json.dumps(result, indent=2))
 
 
-def _render_search(data: dict) -> str:
-    results = data.get("results", [])
+def _render_search(data) -> str:
+    # API 返回列表；旧格式也兼容 {results: [...]}
+    results = data if isinstance(data, list) else data.get("results", [])
     if not results:
         return "没有找到相关结果。"
-    lines = []
+    lines = ["## 搜索结果"]
     for i, ent in enumerate(results, 1):
-        score = ent.get("composite", 0)
-        title = ent.get("title", ent.get("id", "?"))
+        score = ent.get("composite", 0) or 0
+        title = ent.get("title") or ent.get("id", "?")
         eid = ent.get("id", "")
-        cat = ent.get("category", "")
-        lines.append(f"{i}. [{title}]({eid}) — ⭐{score:.1f}分  [{cat}]")
-    return "## 搜索结果\n" + "\n".join(lines)
+        layer = ent.get("layer", "")
+        snippet = ent.get("snippet", "")
+        line = f"{i}. [{title}]({eid}) — ⭐{score:.1f}分"
+        if layer:
+            line += f" [{layer}]"
+        if snippet:
+            line += f"\n   {snippet}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
-def _render_top(data: dict) -> str:
-    results = data.get("results", [])
+def _render_top(data) -> str:
+    # API 返回列表；旧格式也兼容 {results: [...]}
+    results = data if isinstance(data, list) else data.get("results", [])
     if not results:
         return "没有找到结果。"
-    lines = []
+    lines = [f"## Top {len(results)}"]
     for i, ent in enumerate(results, 1):
-        score = ent.get("composite", 0)
-        title = ent.get("title", ent.get("id", "?"))
+        score = ent.get("composite", 0) or 0
+        title = ent.get("title") or ent.get("id", "?")
         eid = ent.get("id", "")
-        lines.append(f"{i}. [{title}]({eid}) — ⭐{score:.1f}分")
-    return "## Top " + str(len(results)) + "\n" + "\n".join(lines)
+        layer = ent.get("layer", "")
+        line = f"{i}. [{title}]({eid}) — ⭐{score:.1f}分"
+        if layer:
+            line += f" [{layer}]"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _render_get(data: dict) -> str:
     title = data.get("title", "?")
     eid = data.get("id", "?")
-    cat = data.get("category", "?")
-    scores = data.get("scores", {})
-    interest = scores.get("interest", 0)
-    strategy = scores.get("strategy", 0)
-    consensus = scores.get("consensus", 0)
-    final = data.get("composite", 0)
+    layer = data.get("layer", "?")
+    status = data.get("status", "")
+    # API 返回 score 对象（interest/strategy/consensus/composite/...）
+    score = data.get("score") or {}
+    interest = score.get("interest", 0) or 0
+    strategy = score.get("strategy", 0) or 0
+    consensus = score.get("consensus", 0) or 0
+    final = score.get("composite", data.get("composite", 0)) or 0
 
-    outgoing = data.get("outgoing_refs", [])
-    incoming = data.get("incoming_refs", [])
+    refs = data.get("refs", [])
 
-    parts = [f"## {title} ({eid})", f"分类：{cat}", f"⭐ 评分：{final:.1f}（interest {interest:.1f} / strategy {strategy:.1f} / consensus {consensus:.1f}）"]
+    parts = [f"## {title} ({eid})"]
+    if layer:
+        parts.append(f"分类：{layer}")
+    if status:
+        parts.append(f"状态：{status}")
+    parts.append(f"⭐ 评分：{final:.1f}（interest {interest:.1f} / strategy {strategy:.1f} / consensus {consensus:.1f}）")
 
-    if outgoing:
-        refs = ", ".join(f"[[{r}]]" for r in outgoing)
-        parts.append(f"→ 引用：{refs}")
-    if incoming:
-        refs = ", ".join(f"[[{r}]]" for r in incoming)
-        parts.append(f"← 被引用：{refs}")
+    if refs:
+        refs_str = ", ".join(f"[[{r}]]" for r in refs)
+        parts.append(f"→ 引用：{refs_str}")
 
     return "\n".join(parts)
 
 
-def _render_feed(data: dict) -> str:
+def _render_feed(data) -> str:
+    # API /feed 返回单一列表；旧格式也兼容 {top_inbox/recently_updated/strategic}
+    if isinstance(data, list):
+        top_inbox = data[:3]
+        recently_updated = []
+        strategic = []
+    else:
+        top_inbox = data.get("top_inbox", [])[:3]
+        recently_updated = data.get("recently_updated", [])[:3]
+        strategic = data.get("strategic", [])[:3]
+
     lines = ["**今日焦点**"]
-    for ent in data.get("top_inbox", [])[:3]:
-        title = ent.get("title", "?")
+    for ent in top_inbox:
+        title = ent.get("title") or ent.get("id", "?")
         eid = ent.get("id", "?")
-        score = ent.get("composite", 0)
+        score = ent.get("composite", 0) or 0
         lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
 
-    lines.append("**最近更新**")
-    for ent in data.get("recently_updated", [])[:3]:
-        title = ent.get("title", "?")
-        eid = ent.get("id", "?")
-        score = ent.get("composite", 0)
-        lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
+    if recently_updated:
+        lines.append("**最近更新**")
+        for ent in recently_updated:
+            title = ent.get("title") or ent.get("id", "?")
+            eid = ent.get("id", "?")
+            score = ent.get("composite", 0) or 0
+            lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
 
-    lines.append("**战略焦点**")
-    for ent in data.get("strategic", [])[:3]:
-        title = ent.get("title", "?")
-        eid = ent.get("id", "?")
-        score = ent.get("composite", 0)
-        lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
+    if strategic:
+        lines.append("**战略焦点**")
+        for ent in strategic:
+            title = ent.get("title") or ent.get("id", "?")
+            eid = ent.get("id", "?")
+            score = ent.get("composite", 0) or 0
+            lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
 
     return "\n".join(lines)
 
