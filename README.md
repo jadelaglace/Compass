@@ -168,13 +168,15 @@ Compass/
 - [x] T1.7 验收测试（端到端闭环）
 - [x] T1.8 文档与样例（Templater 模板 + README）
 
-### Phase 2 · 浮现与可视化（待开发）
+### Phase 2 · 浮现与可视化 ✅
 
-衰减调度 + Feed 三模式 + 引力场 Web（HTMX+D3）
+衰减调度 + Feed 三模式 + 引力场 Web（HTMX+D3）已完成。
 
-### Phase 3 · Agent/Skill 对接（待开发）
+### Phase 3 · Agent/Skill 对接 ✅
 
-适配 skill 脚本 + 全链路验收
+已完成 skill 脚本适配、`POST /agent/context`、search 响应对齐及本地全链路验收。
+
+验收路径：`skill action → Rust HTTP API → vault/frontmatter → FileWatcher → skill render`。
 
 ## 测试
 
@@ -183,7 +185,15 @@ cd compass-core
 cargo test
 ```
 
-115 个测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / FTS5 / FileWatcher / API 7 端点 / 端到端闭环。
+119 个 Rust 测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / FTS5 / FileWatcher / API / 端到端闭环。
+
+skill 侧另有 18 个 renderer 单测和 10 个 HTTP E2E：
+
+```bash
+cd skills/compass
+python -m unittest test_compass.py
+python -m unittest test_e2e.py
+```
 
 ## License
 
