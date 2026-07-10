@@ -13,6 +13,7 @@ Actions:
     context  Agent context injection
     create   Create new entity
     score    Update entity scores
+    access   Record access (triggers score boost)
 
 Environment:
     COMPASS_API_URL  API base URL (default: http://localhost:8080)
@@ -25,6 +26,12 @@ import argparse
 import urllib.request
 import urllib.error
 import urllib.parse
+
+# Windows 控制台默认 GBK，emoji(✅⭐)会 UnicodeEncodeError；强制 stdout/stderr UTF-8
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 def get_api_url() -> str:
@@ -123,8 +130,8 @@ def action_search(params: dict) -> None:
 
 def action_top(params: dict) -> None:
     limit = int(params.get("limit", 20))
-    category = params.get("category") or None
-    result = http_get("/entities/top", {"limit": limit, **(({"category": category}) if category else {})})
+    layer = params.get("layer") or params.get("category") or None
+    result = http_get("/entities/top", {"limit": limit, **(({"layer": layer}) if layer else {})})
     print(json.dumps(result, indent=2))
 
 
@@ -139,7 +146,8 @@ def action_get(params: dict) -> None:
 
 def action_feed(params: dict) -> None:
     limit = int(params.get("limit", 10))
-    result = http_get("/feed", {"limit": limit})
+    mode = params.get("mode", "explore")
+    result = http_get("/feed", {"limit": limit, "mode": mode})
     print(json.dumps(result, indent=2))
 
 
@@ -154,22 +162,19 @@ def action_context(params: dict) -> None:
 
 
 def action_create(params: dict) -> None:
-    required = ["id", "title", "vault_path"]
-    for field in required:
-        if not params.get(field):
-            print(json.dumps({"error": f"{field} is required"}), file=sys.stderr)
-            sys.exit(1)
+    if not params.get("title"):
+        print(json.dumps({"error": "title is required"}), file=sys.stderr)
+        sys.exit(1)
 
-    data = {
-        "id": params["id"],
+    data: dict = {
         "title": params["title"],
-        "category": params.get("category", "Inbox"),
-        "vault_path": params["vault_path"],
-        "interest": float(params.get("interest", 5.0)),
-        "strategy": float(params.get("strategy", 5.0)),
-        "consensus": float(params.get("consensus", 0.0)),
-        "content": params.get("content") or None,
+        "layer": params.get("layer", "knowledge"),
     }
+    for dim in ("interest", "strategy", "consensus"):
+        if dim in params:
+            data[dim] = float(params[dim])
+    if params.get("content"):
+        data["content"] = params["content"]
     result = http_post("/entities", data)
     print(json.dumps(result, indent=2))
 
@@ -189,15 +194,26 @@ def action_score(params: dict) -> None:
     print(json.dumps(result, indent=2))
 
 
+def action_access(params: dict) -> None:
+    entity_id = params.get("id")
+    if not entity_id:
+        print(json.dumps({"error": "id is required"}), file=sys.stderr)
+        sys.exit(1)
+
+    depth = params.get("depth", "read")
+    result = http_patch(f"/entities/{entity_id}/access", {"depth": depth})
+    print(json.dumps(result, indent=2))
+
+
 def _render_search(data: dict) -> str:
     results = data.get("results", [])
     if not results:
         return "没有找到相关结果。"
     lines = []
     for i, ent in enumerate(results, 1):
-        score = ent.get("final_score", 0)
-        title = ent.get("title", ent.get("entity_id", "?"))
-        eid = ent.get("entity_id", "")
+        score = ent.get("composite", 0)
+        title = ent.get("title", ent.get("id", "?"))
+        eid = ent.get("id", "")
         cat = ent.get("category", "")
         lines.append(f"{i}. [{title}]({eid}) — ⭐{score:.1f}分  [{cat}]")
     return "## 搜索结果\n" + "\n".join(lines)
@@ -209,22 +225,22 @@ def _render_top(data: dict) -> str:
         return "没有找到结果。"
     lines = []
     for i, ent in enumerate(results, 1):
-        score = ent.get("final_score", 0)
-        title = ent.get("title", ent.get("entity_id", "?"))
-        eid = ent.get("entity_id", "")
+        score = ent.get("composite", 0)
+        title = ent.get("title", ent.get("id", "?"))
+        eid = ent.get("id", "")
         lines.append(f"{i}. [{title}]({eid}) — ⭐{score:.1f}分")
     return "## Top " + str(len(results)) + "\n" + "\n".join(lines)
 
 
 def _render_get(data: dict) -> str:
     title = data.get("title", "?")
-    eid = data.get("entity_id", "?")
+    eid = data.get("id", "?")
     cat = data.get("category", "?")
     scores = data.get("scores", {})
     interest = scores.get("interest", 0)
     strategy = scores.get("strategy", 0)
     consensus = scores.get("consensus", 0)
-    final = data.get("final_score", 0)
+    final = data.get("composite", 0)
 
     outgoing = data.get("outgoing_refs", [])
     incoming = data.get("incoming_refs", [])
@@ -245,22 +261,22 @@ def _render_feed(data: dict) -> str:
     lines = ["**今日焦点**"]
     for ent in data.get("top_inbox", [])[:3]:
         title = ent.get("title", "?")
-        eid = ent.get("entity_id", "?")
-        score = ent.get("final_score", 0)
+        eid = ent.get("id", "?")
+        score = ent.get("composite", 0)
         lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
 
     lines.append("**最近更新**")
     for ent in data.get("recently_updated", [])[:3]:
         title = ent.get("title", "?")
-        eid = ent.get("entity_id", "?")
-        score = ent.get("final_score", 0)
+        eid = ent.get("id", "?")
+        score = ent.get("composite", 0)
         lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
 
     lines.append("**战略焦点**")
     for ent in data.get("strategic", [])[:3]:
         title = ent.get("title", "?")
-        eid = ent.get("entity_id", "?")
-        score = ent.get("final_score", 0)
+        eid = ent.get("id", "?")
+        score = ent.get("composite", 0)
         lines.append(f"- [{title}]({eid}) — ⭐{score:.1f}")
 
     return "\n".join(lines)
@@ -273,9 +289,9 @@ def _render_context(data: dict) -> str:
     lines = ["## 上下文"]
     for ent in ctx:
         title = ent.get("title", "?")
-        eid = ent.get("entity_id", "?")
+        eid = ent.get("id", "?")
         summary = ent.get("content", "")[:100]
-        score = ent.get("final_score", 0)
+        score = ent.get("composite", 0)
         lines.append(f"- [{title}]({eid})：{summary}... ⭐{score:.1f}")
     reasoning = data.get("reasoning", "")
     if reasoning:
@@ -285,15 +301,22 @@ def _render_context(data: dict) -> str:
 
 def _render_create(data: dict) -> str:
     title = data.get("title", "?")
-    eid = data.get("entity_id", "?")
+    eid = data.get("id", "?")
     return f"✅ 已创建：[{title}]({eid})"
 
 
 def _render_score(data: dict) -> str:
-    title = data.get("title", "?")
-    eid = data.get("entity_id", "?")
-    score = data.get("final_score", 0)
-    return f"✅ 评分已更新：[{title}]({eid}) — ⭐{score:.1f}"
+    eid = data.get("id", "?")
+    s = data.get("score") or {}
+    composite = s.get("composite", data.get("composite", 0))
+    return f"✅ 评分已更新：[{eid}]({eid}) - ⭐{composite:.1f}"
+
+
+def _render_access(data: dict) -> str:
+    eid = data.get("id", "?")
+    s = data.get("score") or {}
+    composite = s.get("composite", data.get("composite", 0))
+    return f"✅ 访问已记录：[{eid}]({eid}) - ⭐{composite:.1f}"
 
 
 def action_render(params: dict) -> None:
@@ -325,6 +348,7 @@ def action_render(params: dict) -> None:
         "context": _render_context,
         "create": _render_create,
         "score": _render_score,
+        "access": _render_access,
     }
 
     if action_name not in renderers:
@@ -345,6 +369,7 @@ ACTIONS = {
     "context": action_context,
     "create": action_create,
     "score": action_score,
+    "access": action_access,
     "render": action_render,
 }
 
