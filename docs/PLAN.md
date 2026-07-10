@@ -100,6 +100,6 @@ Phase 1、Phase 2、Phase 3 已完成。Phase 3 的本地验收从 `skills/compa
 
 `skill action → Rust HTTP API → frontmatter/SQLite → FileWatcher → skill render`
 
-证据：`skills/compass/test_e2e.py`（10 个 E2E）和 `skills/compass/test_compass.py`（18 个 renderer 单测）。
+证据：`skills/compass/test_e2e.py`（14 个 E2E）和 `skills/compass/test_compass.py`（18 个 renderer 单测）。
 
 下一步为按需进入 Phase 4 智能增强；当前不启动自动标签、关联推荐或周报等非核心功能。

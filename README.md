@@ -187,7 +187,7 @@ cargo test
 
 119 个 Rust 测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / FTS5 / FileWatcher / API / 端到端闭环。
 
-skill 侧另有 18 个 renderer 单测和 10 个 HTTP E2E：
+skill 侧另有 18 个 renderer 单测和 14 个 HTTP E2E：
 
 ```bash
 cd skills/compass
