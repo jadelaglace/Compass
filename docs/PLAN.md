@@ -10,9 +10,9 @@
 
 | Phase | 名称 | 周期 | 状态 | 验收闭环 |
 |-------|------|------|------|----------|
-| 1 | 核心闭环 | 2-3 周 | 待开发 | Obsidian 新建笔记→引擎算分写回 frontmatter→Dataview 排序可见 |
+| 1 | 核心闭环 | 2-3 周 | ✅ 完成 | Obsidian 新建笔记→引擎算分写回 frontmatter→Dataview 排序可见 |
 | 2 | 浮现与可视化 | 2 周 | ✅ 完成 | `/feed` 浮现正确；Web 引力场节点大小=评分 |
-| 3 | Agent/Skill 对接 | 1-2 周 | 待开发 | 飞书"记一下 X"→vault 新增 .md；"今天有什么"→feed 卡片 |
+| 3 | Agent/Skill 对接 | 1-2 周 | ✅ 完成 | skill action→Compass API→vault；本地 E2E 覆盖 action + render + FileWatcher |
 | 4 | 智能增强 | 按需 | 待开发 | 自动标签/关联推荐/周报 |
 | 5 | 打磨 | 按需 | 待开发 | Dataview 模板库 + Git 备份 + 跨端同步 |
 
@@ -94,12 +94,12 @@
 
 ---
 
-## 6. 立即下一步
+## 6. 当前状态与下一步
 
-**启动 Phase 1 · T1.1 项目骨架**：
-1. 创建 `compass-core/` Cargo workspace（复用目录名，清空旧 Rust 代码）
-2. `Cargo.toml` 引入：axum、rusqlite(bundled)、notify、serde、serde_yaml、chrono、regex、tokio、tower-http
-3. `compass.toml` 配置骨架（vault_path、port=8080、decay 参数）
-4. axum `/health` 端点
+Phase 1、Phase 2、Phase 3 已完成。Phase 3 的本地验收从 `skills/compass` 开始，覆盖：
 
-> 待你确认即可开工。
+`skill action → Rust HTTP API → frontmatter/SQLite → FileWatcher → skill render`
+
+证据：`skills/compass/test_e2e.py`（10 个 E2E）和 `skills/compass/test_compass.py`（18 个 renderer 单测）。
+
+下一步为按需进入 Phase 4 智能增强；当前不启动自动标签、关联推荐或周报等非核心功能。
