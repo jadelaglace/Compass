@@ -117,6 +117,31 @@ pub struct AccessRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AgentContextRequest {
+    pub task: String,
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentContextEntry {
+    pub id: String,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub composite: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentContextResponse {
+    pub context: Vec<AgentContextEntry>,
+    pub reasoning: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct FeedQuery {
     #[serde(default = "default_feed_mode")]
     pub mode: String,
@@ -156,6 +181,7 @@ pub fn router(state: AppState) -> Router {
         .route("/entities", post(create_entity))
         .route("/entities/:id/score", patch(update_score))
         .route("/entities/:id/access", patch(record_access))
+        .route("/agent/context", post(agent_context))
         .route("/graph", get(graph))
         .with_state(state)
 }
@@ -480,6 +506,50 @@ pub(crate) async fn record_access(
             "updated_at": score.updated_at,
         }
     })))
+}
+
+pub(crate) async fn agent_context(
+    State(state): State<AppState>,
+    Json(req): Json<AgentContextRequest>,
+) -> Result<Json<AgentContextResponse>, AppError> {
+    let db = state.db.lock().await;
+
+    // 1. FTS5 语义召回（最多 3*top_k，留足排序空间）
+    let recall_limit = (req.top_k * 3).max(10) as u32;
+    let hits = db.fts_search(&req.task, recall_limit)?;
+
+    // 2. 组装上下文：读实体 + 内容片段，按 composite 加权排序
+    let mut entries: Vec<AgentContextEntry> = Vec::new();
+    for hit in hits {
+        let entity = match db.get_entity(&hit.id)? {
+            Some(e) => e,
+            None => continue,
+        };
+        entries.push(AgentContextEntry {
+            id: entity.id,
+            title: hit.title,
+            content: hit.snippet,
+            composite: entity.composite,
+        });
+    }
+    entries.sort_by(|a, b| {
+        b.composite
+            .unwrap_or(0.0)
+            .partial_cmp(&a.composite.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries.truncate(req.top_k);
+
+    let reasoning = format!(
+        "从 vault 中召回 {} 个相关实体，按 composite 评分加权取前 {} 个作为上下文。",
+        entries.len(),
+        req.top_k
+    );
+
+    Ok(Json(AgentContextResponse {
+        context: entries,
+        reasoning,
+    }))
 }
 
 pub(crate) async fn graph(State(state): State<AppState>) -> Result<Json<GraphData>, AppError> {
@@ -1294,5 +1364,49 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_agent_context() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &sample_entity("know-high", "a.md", 90.0, "knowledge"),
+            "Nash equilibrium is a core concept in game theory",
+        )
+        .unwrap();
+        db.upsert_entity(
+            &sample_entity("know-low", "b.md", 30.0, "knowledge"),
+            "Nash equilibrium is a core concept in game theory",
+        )
+        .unwrap();
+        drop(db);
+
+        let req = AgentContextRequest {
+            task: "Nash equilibrium".to_string(),
+            top_k: 1,
+        };
+        let resp = agent_context(State(state), Json(req)).await.unwrap().0;
+        assert_eq!(resp.context.len(), 1);
+        assert_eq!(resp.context[0].id, "know-high", "应按 composite 加权取最高");
+        assert!(resp.context[0]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("Nash"));
+        assert!(!resp.reasoning.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_agent_context_empty() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let req = AgentContextRequest {
+            task: "nonexistent query".to_string(),
+            top_k: 5,
+        };
+        let resp = agent_context(State(state), Json(req)).await.unwrap().0;
+        assert!(resp.context.is_empty());
     }
 }
