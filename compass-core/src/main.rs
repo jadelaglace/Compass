@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 启动 FileWatcher
     let mut file_watcher =
-        watcher::FileWatcher::new(cfg.vault_path.clone(), db.clone(), cfg.weights.clone());
+        watcher::FileWatcher::new(cfg.vault_path.clone(), db.clone(), cfg.weights);
     file_watcher.start().await?;
     info!("FileWatcher started");
 
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let decay_scheduler = DecayScheduler::new(
         db.clone(),
         cfg.vault_path.clone(),
-        cfg.weights.clone(),
+        cfg.weights,
         cfg.decay.clone(),
     );
     decay_scheduler.start().await?;

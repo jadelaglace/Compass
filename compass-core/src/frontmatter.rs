@@ -56,7 +56,7 @@ pub fn get_score(frontmatter: &str) -> Result<Option<Score>> {
     let Some(m) = fm.as_mapping() else {
         return Err(anyhow!("frontmatter 不是 mapping"));
     };
-    match m.get(&Value::String("score".into())) {
+    match m.get(Value::String("score".into())) {
         Some(v) => Ok(Some(
             serde_yaml::from_value(v.clone()).context("解析 score 块失败")?,
         )),
@@ -95,8 +95,7 @@ pub fn replace_score_block(frontmatter: &str, new_block: &str) -> String {
         Some(start_idx) => {
             // score 块结束 = 下一个顶层 key（非空且无前导空白）或文件尾
             let mut end_idx = lines.len();
-            for i in (start_idx + 1)..lines.len() {
-                let l = lines[i];
+            for (i, l) in lines.iter().enumerate().skip(start_idx + 1) {
                 if !l.is_empty() && !l.starts_with(' ') && !l.starts_with('\t') {
                     end_idx = i;
                     break;

@@ -35,6 +35,7 @@ impl Default for Weights {
 /// 实体层级（三大界）。
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
 pub enum Layer {
     Direction,
     Knowledge,
