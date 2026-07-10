@@ -251,7 +251,7 @@ async fn test_e2e_search_after_create() {
     fs::create_dir_all(&vault).unwrap();
     let state = setup(&vault);
 
-    api::create_entity(
+    let _ = api::create_entity(
         axum::extract::State(state.clone()),
         axum::Json(CreateEntityRequest {
             title: "纳什均衡".to_string(),
