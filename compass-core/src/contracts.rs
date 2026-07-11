@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 #[allow(dead_code)]
 pub const CONTENT_HASH_ALGORITHM: &str = "sha256-note-v1";
 pub const TAG_ALGORITHM_VERSION: &str = "tags-v1";
+pub const RELATED_ALGORITHM_VERSION: &str = "related-v1";
 #[allow(dead_code)]
 pub const MAX_SUGGESTIONS_PER_REQUEST: usize = 20;
 

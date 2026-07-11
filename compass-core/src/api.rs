@@ -3,6 +3,7 @@
 //! 字段统一（#160）：响应用 `id`/`composite`（PRD v3.0），非 v2.x 的 `entity_id`/`final_score`。
 //! 写回端点（score/access/create）：读 frontmatter -> 改 score -> 原子写回 -> 更新 SQLite。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,8 +18,12 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::config::Config;
-use crate::db::{Db, EntityRow};
-use crate::frontmatter;
+use crate::contracts::{
+    candidate_key, note_content_hash, stable_suggestion_id, SuggestionKind, SuggestionStatus,
+    TagSuggestion, TAG_ALGORITHM_VERSION,
+};
+use crate::db::{Db, EntityRow, SuggestionRow};
+use crate::frontmatter::{self, MetadataPatch, MetadataPatchError};
 use crate::models::Weights;
 use crate::scoring;
 
@@ -174,6 +179,22 @@ pub struct SearchQuery {
     pub limit: u32,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct TagSuggestionsRequest {
+    #[serde(default)]
+    pub candidates: Vec<TagCandidateRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TagCandidateRequest {
+    pub tag: String,
+    pub confidence: f64,
+    pub reason: String,
+    pub source: String,
+    pub algorithm_version: String,
+    pub content_hash: String,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -181,6 +202,15 @@ pub fn router(state: AppState) -> Router {
         .route("/entities/top", get(entities_top))
         .route("/entities/:id", get(get_entity))
         .route("/search", get(search))
+        .route("/entities/:id/tag-suggestions", post(tag_suggestions))
+        .route(
+            "/tag-suggestions/:suggestion_id/accept",
+            post(accept_tag_suggestion),
+        )
+        .route(
+            "/tag-suggestions/:suggestion_id/reject",
+            post(reject_tag_suggestion),
+        )
         .route("/entities", post(create_entity))
         .route("/entities/:id/score", patch(update_score))
         .route("/entities/:id/access", patch(record_access))
@@ -331,6 +361,190 @@ pub(crate) async fn search(
         })
         .collect();
     Ok(Json(results))
+}
+
+pub(crate) async fn tag_suggestions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<TagSuggestionsRequest>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().await;
+    let entity = db
+        .get_entity(&id)?
+        .ok_or_else(|| AppError::not_found(&id))?;
+    let file_path = state.vault.join(&entity.file_path);
+    let raw = std::fs::read_to_string(&file_path)
+        .map_err(|e| AppError::internal(&format!("读取笔记失败: {e}")))?;
+    let note = frontmatter::read_note(&file_path)
+        .map_err(|e| AppError::internal(&format!("解析笔记失败: {e}")))?;
+    let content_hash = note_content_hash(&raw)?;
+    let existing = frontmatter::extract_tags(&note.frontmatter);
+    let candidates = match body.map(|json| json.0).unwrap_or_default().candidates {
+        candidates if candidates.is_empty() => {
+            lexical_tag_candidates(&note.frontmatter, &note.body, &existing, &content_hash)
+        }
+        candidates => candidates
+            .into_iter()
+            .map(|candidate| {
+                if candidate.content_hash != content_hash {
+                    return Err(AppError::conflict(
+                        "suggestion_expired",
+                        "agent candidate content hash is stale",
+                    ));
+                }
+                if candidate.source.trim().is_empty()
+                    || candidate.algorithm_version.trim().is_empty()
+                {
+                    return Err(AppError::bad_request(
+                        "agent candidate source and algorithm_version are required",
+                    ));
+                }
+                let tag = crate::contracts::normalize_tag(&candidate.tag)
+                    .map_err(|e| AppError::bad_request(&e.to_string()))?;
+                Ok((
+                    tag,
+                    candidate.confidence,
+                    candidate.reason,
+                    candidate.source,
+                    candidate.algorithm_version,
+                    candidate.content_hash,
+                ))
+            })
+            .collect::<Result<Vec<_>, AppError>>()?,
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut suggestions = Vec::new();
+    for (tag, confidence, reason, source, algorithm_version, candidate_hash) in candidates {
+        if existing
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(&tag))
+        {
+            continue;
+        }
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(AppError::bad_request("confidence must be between 0 and 1"));
+        }
+        let suggestion = SuggestionRow {
+            suggestion_id: stable_suggestion_id(
+                SuggestionKind::Tag,
+                &id,
+                &tag,
+                &candidate_hash,
+                &algorithm_version,
+                &source,
+            ),
+            kind: "tag".to_string(),
+            entity_id: id.clone(),
+            candidate: tag.clone(),
+            candidate_key: candidate_key(SuggestionKind::Tag, &tag),
+            confidence: Some(confidence),
+            reason,
+            source,
+            algorithm_version,
+            content_hash: candidate_hash,
+            status: "pending".to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        db.upsert_suggestion(&suggestion)?;
+        if let Some(row) = db.get_suggestion(&suggestion.suggestion_id)? {
+            suggestions.push(tag_suggestion_json(&row)?);
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "entity_id": id,
+        "content_hash": content_hash,
+        "suggestions": suggestions,
+    })))
+}
+
+pub(crate) async fn accept_tag_suggestion(
+    State(state): State<AppState>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().await;
+    let suggestion = db
+        .get_suggestion(&suggestion_id)?
+        .ok_or_else(|| AppError::not_found(&suggestion_id))?;
+    ensure_suggestion_kind(&suggestion, "tag")?;
+    match suggestion.status.as_str() {
+        "accepted" | "rejected" | "expired" => {
+            if suggestion.status == "rejected" {
+                return Err(AppError::conflict(
+                    "suggestion_rejected",
+                    "rejected suggestion cannot be accepted",
+                ));
+            }
+            return Ok(Json(tag_suggestion_json(&suggestion)?));
+        }
+        "pending" => {}
+        _ => return Err(AppError::internal("invalid suggestion status")),
+    }
+    let entity = db
+        .get_entity(&suggestion.entity_id)?
+        .ok_or_else(|| AppError::not_found(&suggestion.entity_id))?;
+    let file_path = state.vault.join(&entity.file_path);
+    let raw = std::fs::read_to_string(&file_path)
+        .map_err(|e| AppError::internal(&format!("读取笔记失败: {e}")))?;
+    let actual_hash = note_content_hash(&raw)?;
+    if actual_hash != suggestion.content_hash {
+        expire_suggestion(&db, &suggestion.suggestion_id)?;
+        return Err(AppError::conflict(
+            "suggestion_expired",
+            "suggestion content hash is stale",
+        ));
+    }
+    let result = frontmatter::patch_metadata(
+        &file_path,
+        &suggestion.content_hash,
+        &[MetadataPatch::AddTag(suggestion.candidate.clone())],
+    )
+    .map_err(map_metadata_patch_error)?;
+    refresh_relationship_index(&db, &suggestion.entity_id, &file_path)?;
+    db.update_suggestion_status(
+        &suggestion.suggestion_id,
+        "accepted",
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    let updated = db
+        .get_suggestion(&suggestion.suggestion_id)?
+        .ok_or_else(|| AppError::internal("accepted suggestion disappeared"))?;
+    let mut response = tag_suggestion_json(&updated)?;
+    response["changed"] = serde_json::json!(result.changed);
+    response["content_hash"] = serde_json::json!(result.content_hash);
+    Ok(Json(response))
+}
+
+pub(crate) async fn reject_tag_suggestion(
+    State(state): State<AppState>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().await;
+    let suggestion = db
+        .get_suggestion(&suggestion_id)?
+        .ok_or_else(|| AppError::not_found(&suggestion_id))?;
+    ensure_suggestion_kind(&suggestion, "tag")?;
+    match suggestion.status.as_str() {
+        "accepted" => {
+            return Err(AppError::conflict(
+                "suggestion_accepted",
+                "accepted suggestion cannot be rejected",
+            ));
+        }
+        "rejected" | "expired" => return Ok(Json(tag_suggestion_json(&suggestion)?)),
+        "pending" => {}
+        _ => return Err(AppError::internal("invalid suggestion status")),
+    }
+    db.update_suggestion_status(
+        &suggestion.suggestion_id,
+        "rejected",
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    let updated = db
+        .get_suggestion(&suggestion.suggestion_id)?
+        .ok_or_else(|| AppError::internal("rejected suggestion disappeared"))?;
+    Ok(Json(tag_suggestion_json(&updated)?))
 }
 
 pub(crate) async fn create_entity(
@@ -652,6 +866,173 @@ fn parse_access_depth(s: &str) -> Option<scoring::AccessDepth> {
     }
 }
 
+fn lexical_tag_candidates(
+    frontmatter: &str,
+    body: &str,
+    existing: &[String],
+    content_hash: &str,
+) -> Vec<(String, f64, String, String, String, String)> {
+    let mut frequencies = BTreeMap::<String, usize>::new();
+    if let Some(category) = yaml_scalar(frontmatter, "category") {
+        add_lexical_terms(&mut frequencies, &category, 2);
+    }
+    if let Some(title) = yaml_scalar(frontmatter, "title") {
+        add_lexical_terms(&mut frequencies, &title, 3);
+    }
+    add_lexical_terms(&mut frequencies, body, 1);
+
+    let existing = existing
+        .iter()
+        .map(|value| value.to_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    let mut values = frequencies
+        .into_iter()
+        .filter(|(term, count)| {
+            *count > 0
+                && term.chars().count() >= 2
+                && term.chars().count() <= 48
+                && !existing.contains(term)
+        })
+        .collect::<Vec<_>>();
+    values.sort_by(|(left_term, left_count), (right_term, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_term.cmp(right_term))
+    });
+    values
+        .into_iter()
+        .take(crate::contracts::MAX_SUGGESTIONS_PER_REQUEST)
+        .map(|(term, count)| {
+            let confidence = (0.45 + count as f64 * 0.1).min(0.99);
+            (
+                term,
+                confidence,
+                format!("lexical overlap count: {count}"),
+                "rust_lexical".to_string(),
+                TAG_ALGORITHM_VERSION.to_string(),
+                content_hash.to_string(),
+            )
+        })
+        .collect()
+}
+
+fn add_lexical_terms(frequencies: &mut BTreeMap<String, usize>, text: &str, weight: usize) {
+    let mut current = String::new();
+    let mut flush = |current: &mut String| {
+        if current.chars().count() >= 2 {
+            let term = current.to_lowercase();
+            if !is_tag_stopword(&term) && !term.chars().all(char::is_numeric) {
+                *frequencies.entry(term).or_default() += weight;
+            }
+        }
+        current.clear();
+    };
+    for character in text.chars() {
+        if character.is_alphanumeric() {
+            current.push(character);
+        } else {
+            flush(&mut current);
+        }
+    }
+    flush(&mut current);
+}
+
+fn is_tag_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "for"
+            | "from"
+            | "in"
+            | "is"
+            | "it"
+            | "of"
+            | "on"
+            | "or"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "with"
+    )
+}
+
+fn yaml_scalar(frontmatter: &str, key: &str) -> Option<String> {
+    let value = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
+    value
+        .as_mapping()?
+        .get(serde_yaml::Value::String(key.to_string()))?
+        .as_str()
+        .map(ToString::to_string)
+}
+
+fn tag_suggestion_json(row: &SuggestionRow) -> Result<serde_json::Value, AppError> {
+    let status = parse_suggestion_status(&row.status)?;
+    let suggestion = TagSuggestion {
+        suggestion_id: row.suggestion_id.clone(),
+        entity_id: row.entity_id.clone(),
+        tag: row.candidate.clone(),
+        confidence: row.confidence.unwrap_or(0.0),
+        reason: row.reason.clone(),
+        source: row.source.clone(),
+        algorithm_version: row.algorithm_version.clone(),
+        content_hash: row.content_hash.clone(),
+        status,
+    };
+    serde_json::to_value(suggestion)
+        .map_err(|e| AppError::internal(&format!("serialize suggestion failed: {e}")))
+}
+
+fn parse_suggestion_status(status: &str) -> Result<SuggestionStatus, AppError> {
+    match status {
+        "pending" => Ok(SuggestionStatus::Pending),
+        "accepted" => Ok(SuggestionStatus::Accepted),
+        "rejected" => Ok(SuggestionStatus::Rejected),
+        "expired" => Ok(SuggestionStatus::Expired),
+        _ => Err(AppError::internal("invalid suggestion status")),
+    }
+}
+
+fn ensure_suggestion_kind(suggestion: &SuggestionRow, expected: &str) -> Result<(), AppError> {
+    if suggestion.kind != expected {
+        return Err(AppError::not_found(&suggestion.suggestion_id));
+    }
+    Ok(())
+}
+
+fn expire_suggestion(db: &Db, suggestion_id: &str) -> Result<(), AppError> {
+    db.update_suggestion_status(suggestion_id, "expired", &chrono::Utc::now().to_rfc3339())?;
+    Ok(())
+}
+
+fn refresh_relationship_index(
+    db: &Db,
+    entity_id: &str,
+    path: &std::path::Path,
+) -> Result<(), AppError> {
+    let note = frontmatter::read_note(path)
+        .map_err(|e| AppError::internal(&format!("重新索引笔记失败: {e}")))?;
+    db.replace_entity_relationships(
+        entity_id,
+        &frontmatter::extract_tags(&note.frontmatter),
+        &frontmatter::extract_refs(&note.body),
+    )?;
+    Ok(())
+}
+
+fn map_metadata_patch_error(error: anyhow::Error) -> AppError {
+    if error.downcast_ref::<MetadataPatchError>().is_some() {
+        return AppError::conflict("suggestion_expired", &error.to_string());
+    }
+    AppError::internal(&error.to_string())
+}
+
 fn content_hash(s: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -664,6 +1045,7 @@ fn content_hash(s: &str) -> String {
 pub enum AppError {
     NotFound(String),
     BadRequest(String),
+    Conflict { code: String, message: String },
     Internal(String),
 }
 
@@ -673,6 +1055,12 @@ impl AppError {
     }
     fn bad_request(msg: &str) -> Self {
         Self::BadRequest(msg.to_string())
+    }
+    fn conflict(code: &str, msg: &str) -> Self {
+        Self::Conflict {
+            code: code.to_string(),
+            message: msg.to_string(),
+        }
     }
     fn internal(msg: &str) -> Self {
         Self::Internal(msg.to_string())
@@ -684,6 +1072,17 @@ impl IntoResponse for AppError {
         let (status, msg) = match self {
             AppError::NotFound(id) => (StatusCode::NOT_FOUND, format!("entity not found: {id}")),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::Conflict { code, message } => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "code": code,
+                        "message": message,
+                        "details": {}
+                    })),
+                )
+                    .into_response();
+            }
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
@@ -910,6 +1309,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_tag_suggestions_accept_is_idempotent_and_reject_is_read_only() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let path = dir.path().join("note.md");
+        fs::write(
+            &path,
+            sample_md(
+                "know-tag",
+                "Rust SQLite",
+                70.0,
+                "Rust and SQLite make a durable local index.",
+            ),
+        )
+        .unwrap();
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &sample_entity("know-tag", "note.md", 70.0, "knowledge"),
+            "Rust and SQLite make a durable local index.",
+        )
+        .unwrap();
+        drop(db);
+
+        let created = tag_suggestions(State(state.clone()), Path("know-tag".to_string()), None)
+            .await
+            .unwrap()
+            .0;
+        let suggestions = created["suggestions"].as_array().unwrap();
+        assert!(!suggestions.is_empty());
+        let accept_id = suggestions[0]["suggestion_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let reject_id = suggestions[1]["suggestion_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let accepted = accept_tag_suggestion(State(state.clone()), Path(accept_id.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(accepted["status"], "accepted");
+        let after_accept = fs::read_to_string(&path).unwrap();
+        assert!(after_accept.contains("tags:"));
+        assert!(after_accept.contains(&format!("  - {}", suggestions[0]["tag"].as_str().unwrap())));
+
+        let repeated = accept_tag_suggestion(State(state.clone()), Path(accept_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(repeated["status"], "accepted");
+        assert_eq!(fs::read_to_string(&path).unwrap(), after_accept);
+
+        let before_reject = fs::read_to_string(&path).unwrap();
+        let rejected = reject_tag_suggestion(State(state), Path(reject_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before_reject);
+    }
+
+    #[tokio::test]
+    async fn test_tag_suggestion_stale_accept_returns_conflict_and_expires() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let path = dir.path().join("note.md");
+        fs::write(&path, sample_md("know-stale", "Rust", 70.0, "Rust body.")).unwrap();
+        let db = state.db.lock().await;
+        db.upsert_entity(
+            &sample_entity("know-stale", "note.md", 70.0, "knowledge"),
+            "Rust body.",
+        )
+        .unwrap();
+        drop(db);
+
+        let created = tag_suggestions(State(state.clone()), Path("know-stale".to_string()), None)
+            .await
+            .unwrap()
+            .0;
+        let suggestion_id = created["suggestions"][0]["suggestion_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        fs::write(
+            &path,
+            format!("{}\nchanged", fs::read_to_string(&path).unwrap()),
+        )
+        .unwrap();
+
+        let error = accept_tag_suggestion(State(state.clone()), Path(suggestion_id.clone()))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict { .. }));
+        let row = state
+            .db
+            .lock()
+            .await
+            .get_suggestion(&suggestion_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "expired");
     }
 
     #[test]

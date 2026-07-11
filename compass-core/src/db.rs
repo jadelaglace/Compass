@@ -70,6 +70,24 @@ pub struct FtsHit {
     pub snippet: Option<String>,
 }
 
+/// Persisted Phase 4 suggestion. Suggestions are rebuildable cache rows; Vault remains authoritative.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestionRow {
+    pub suggestion_id: String,
+    pub kind: String,
+    pub entity_id: String,
+    pub candidate: String,
+    pub candidate_key: String,
+    pub confidence: Option<f64>,
+    pub reason: String,
+    pub source: String,
+    pub algorithm_version: String,
+    pub content_hash: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// 全量重建统计。
 #[derive(Debug, Default, Clone)]
 pub struct RebuildStats {
@@ -436,6 +454,72 @@ impl Db {
             .map_err(Into::into)
     }
 
+    #[allow(dead_code)]
+    pub fn directly_linked_entities(&self, entity_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT target_id FROM entity_links WHERE source_id = ?1
+             UNION
+             SELECT source_id FROM entity_links WHERE target_id = ?1
+             ORDER BY 1",
+        )?;
+        let rows = stmt.query_map(params![entity_id], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_suggestion(&self, suggestion: &SuggestionRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO suggestions
+               (suggestion_id, kind, entity_id, candidate, candidate_key, confidence,
+                reason, source, algorithm_version, content_hash, status, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(suggestion_id) DO UPDATE SET
+               confidence=excluded.confidence, reason=excluded.reason,
+               content_hash=excluded.content_hash, updated_at=excluded.updated_at",
+            params![
+                suggestion.suggestion_id,
+                suggestion.kind,
+                suggestion.entity_id,
+                suggestion.candidate,
+                suggestion.candidate_key,
+                suggestion.confidence,
+                suggestion.reason,
+                suggestion.source,
+                suggestion.algorithm_version,
+                suggestion.content_hash,
+                suggestion.status,
+                suggestion.created_at,
+                suggestion.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_suggestion(&self, suggestion_id: &str) -> Result<Option<SuggestionRow>> {
+        self.conn
+            .query_row(
+                "SELECT suggestion_id, kind, entity_id, candidate, candidate_key, confidence,
+                        reason, source, algorithm_version, content_hash, status, created_at, updated_at
+                 FROM suggestions WHERE suggestion_id = ?1",
+                params![suggestion_id],
+                suggestion_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn update_suggestion_status(
+        &self,
+        suggestion_id: &str,
+        status: &str,
+        updated_at: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE suggestions SET status = ?1, updated_at = ?2 WHERE suggestion_id = ?3",
+            params![status, updated_at, suggestion_id],
+        )? > 0)
+    }
+
     /// FTS5 搜索。query 按空白拆词、各自加引号后 AND 连接（避免 `-`/`*` 等被当作 FTS 语法）。
     pub fn fts_search(&self, query: &str, limit: u32) -> Result<Vec<FtsHit>> {
         let q = fts_query(query);
@@ -682,6 +766,24 @@ fn row_to_entity(r: &Row) -> rusqlite::Result<EntityRow> {
         access_count: r.get(9)?,
         last_boosted_at: r.get(10)?,
         content_hash: r.get(11)?,
+        updated_at: r.get(12)?,
+    })
+}
+
+fn suggestion_from_row(r: &Row) -> rusqlite::Result<SuggestionRow> {
+    Ok(SuggestionRow {
+        suggestion_id: r.get(0)?,
+        kind: r.get(1)?,
+        entity_id: r.get(2)?,
+        candidate: r.get(3)?,
+        candidate_key: r.get(4)?,
+        confidence: r.get(5)?,
+        reason: r.get(6)?,
+        source: r.get(7)?,
+        algorithm_version: r.get(8)?,
+        content_hash: r.get(9)?,
+        status: r.get(10)?,
+        created_at: r.get(11)?,
         updated_at: r.get(12)?,
     })
 }
