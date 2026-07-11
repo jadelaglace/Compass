@@ -3,6 +3,9 @@
 
 mod api;
 mod config;
+// T4.0 freezes contracts before the endpoint tasks consume them.
+#[allow(dead_code)]
+mod contracts;
 mod db;
 #[cfg(test)]
 mod e2e_tests;
@@ -38,6 +41,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| cfg.vault_path.join(".compass").join("index.db"));
     let db = Arc::new(Mutex::new(db::Db::open(&db_path)?));
     info!(db = %db_path.display(), "database opened");
+    let schema_version = db.lock().await.schema_version()?;
+    info!(schema_version, "database schema ready");
 
     // 全量重建索引
     let stats = db.lock().await.rebuild_from_vault(&cfg.vault_path)?;

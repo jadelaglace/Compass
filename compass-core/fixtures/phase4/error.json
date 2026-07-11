@@ -1,0 +1,8 @@
+{
+  "code": "suggestion_expired",
+  "message": "the note changed after this suggestion was generated",
+  "details": {
+    "expected_content_hash": "old-hash",
+    "actual_content_hash": "new-hash"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "from": "2026-07-06",
+  "to": "2026-07-13",
+  "tz": "Asia/Shanghai",
+  "generated_at": "2026-07-13T00:00:00Z",
+  "data_quality": {
+    "history_unavailable": false,
+    "missing": []
+  },
+  "score_changes": [
+    {
+      "entity_id": "know-000001",
+      "delta": 2.5
+    }
+  ],
+  "access_count": 3,
+  "new_entities": ["know-000002"],
+  "suggestion_stats": {
+    "accepted": 1,
+    "rejected": 0,
+    "expired": 0
+  }
+}
