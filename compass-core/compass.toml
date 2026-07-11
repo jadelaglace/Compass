@@ -1,7 +1,11 @@
 ﻿# Compass 运行时配置
 # vault_path 相对本文件所在目录解析
 vault_path = "../vault"
+bind = "127.0.0.1"       # 默认仅本机访问；非本机监听需同时设置 allow_non_local = true
 port = 8080
+allow_non_local = false
+# auth_token = "replace-with-a-secret"  # 配置后所有 HTTP 请求需带 Authorization: Bearer <token>
+request_body_limit_bytes = 1048576
 
 [weights]            # 三维默认权重（sum=1.0）
 interest = 0.40
