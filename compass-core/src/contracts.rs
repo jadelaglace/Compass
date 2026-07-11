@@ -59,6 +59,7 @@ pub struct TagSuggestion {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelatedSuggestion {
     pub suggestion_id: String,
+    pub entity_id: String,
     pub id: String,
     pub title: Option<String>,
     pub composite: Option<f64>,
@@ -101,7 +102,7 @@ impl RelatedSuggestion {
             &self.suggestion_id,
             stable_suggestion_id(
                 SuggestionKind::Related,
-                "",
+                &self.entity_id,
                 &self.id,
                 &self.content_hash,
                 &self.algorithm_version,
@@ -337,6 +338,24 @@ mod tests {
             )
         );
         assert_eq!(candidate_key(SuggestionKind::Tag, " Decision "), "decision");
+        assert_ne!(
+            stable_suggestion_id(
+                SuggestionKind::Related,
+                "know-1",
+                "know-2",
+                "hash",
+                "related-v1",
+                "rust_lexical",
+            ),
+            stable_suggestion_id(
+                SuggestionKind::Related,
+                "know-3",
+                "know-2",
+                "hash",
+                "related-v1",
+                "rust_lexical",
+            )
+        );
     }
 
     #[test]
