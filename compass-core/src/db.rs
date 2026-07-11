@@ -529,6 +529,9 @@ impl Db {
 
     /// FTS5 搜索。query 按空白拆词、各自加引号后 AND 连接（避免 `-`/`*` 等被当作 FTS 语法）。
     pub fn fts_search(&self, query: &str, limit: u32) -> Result<Vec<FtsHit>> {
+        if contains_cjk(query) {
+            return self.cjk_substring_search(query, limit);
+        }
         let q = fts_query(query);
         if q.is_empty() {
             return Ok(vec![]);
@@ -550,6 +553,59 @@ impl Db {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    fn cjk_substring_search(&self, query: &str, limit: u32) -> Result<Vec<FtsHit>> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let terms = query
+            .split_whitespace()
+            .filter(|term| !term.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.title, f.content
+             FROM entities_fts f
+             JOIN entities e ON e.rowid = f.rowid
+             ORDER BY e.composite IS NULL, e.composite DESC, e.id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            let (id, title, content) = row?;
+            let title_lowercase = title.as_deref().unwrap_or("").to_lowercase();
+            let content_lowercase = content.to_lowercase();
+            let searchable = format!("{title_lowercase}\n{content_lowercase}");
+            if terms.iter().all(|term| searchable.contains(term)) {
+                let snippet_source = if content_lowercase.contains(&terms[0]) {
+                    content.as_str()
+                } else {
+                    title.as_deref().unwrap_or(content.as_str())
+                };
+                let snippet = search_snippet(snippet_source, &terms[0]);
+                hits.push(FtsHit {
+                    id,
+                    title,
+                    snippet: Some(snippet),
+                });
+                if hits.len() >= limit as usize {
+                    break;
+                }
+            }
+        }
+        Ok(hits)
     }
 
     /// 该实体某触发器类型最近一次触发时间（供 T1.3 冷却判断）。
@@ -897,6 +953,41 @@ fn fts_query(q: &str) -> String {
         .filter(|w| w != "\"\"")
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3400..=0x4DBF
+                | 0x4E00..=0x9FFF
+                | 0xF900..=0xFAFF
+                | 0x3040..=0x30FF
+                | 0xAC00..=0xD7AF
+        )
+    })
+}
+
+fn search_snippet(content: &str, term: &str) -> String {
+    const CONTEXT_BEFORE: usize = 40;
+    const MAX_CHARS: usize = 160;
+
+    let lowercase = content.to_lowercase();
+    let match_byte = lowercase.find(term).unwrap_or(0);
+    let match_char = lowercase[..match_byte].chars().count();
+    let start = match_char.saturating_sub(CONTEXT_BEFORE);
+    let snippet = content
+        .chars()
+        .skip(start)
+        .take(MAX_CHARS)
+        .collect::<String>();
+    let prefix = if start > 0 { "..." } else { "" };
+    let suffix = if content.chars().count() > start + MAX_CHARS {
+        "..."
+    } else {
+        ""
+    };
+    format!("{prefix}{snippet}{suffix}")
 }
 
 /// 递归遍历 .md 文件，跳过隐藏目录/文件（.obsidian/.compass/.git 等）。
@@ -1254,6 +1345,47 @@ mod tests {
         let hits = db.fts_search("Nash equilibrium", 10).unwrap();
         assert_eq!(hits.len(), 1, "多词应 AND，只命中含两词的");
         assert_eq!(hits[0].id, "know-1");
+    }
+
+    #[test]
+    fn test_fts_search_cjk_substring() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_entity(
+            &sample_row("know-cn"),
+            "Compass 使用三维评分引擎管理个人知识。",
+        )
+        .unwrap();
+
+        let hits = db.fts_search("评分", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "know-cn");
+        assert!(hits[0].snippet.as_deref().unwrap().contains("评分"));
+    }
+
+    #[test]
+    fn test_fts_search_cjk_terms_use_and_semantics() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_entity(&sample_row("know-both"), "评分引擎用于知识管理")
+            .unwrap();
+        db.upsert_entity(&sample_row("know-one"), "只有评分内容")
+            .unwrap();
+
+        let hits = db.fts_search("评分 知识", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "know-both");
+    }
+
+    #[test]
+    fn test_fts_search_cjk_title_hit_and_zero_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let mut row = sample_row("know-title");
+        row.title = Some("认知科学索引".to_string());
+        db.upsert_entity(&row, "unrelated body").unwrap();
+
+        let hits = db.fts_search("认知", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.as_deref().unwrap().contains("认知"));
+        assert!(db.fts_search("认知", 0).unwrap().is_empty());
     }
 
     #[test]

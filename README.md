@@ -186,11 +186,11 @@ Compass/
 
 验收路径：`skill action → Rust HTTP API → vault/frontmatter → FileWatcher → skill render`。
 
-### Phase 4 · 智能增强（准备完成，待实现）
+### Phase 4 · 智能增强 ✅
 
 实施入口：[`docs/PHASE4_PREP.md`](docs/PHASE4_PREP.md)。
 
-Phase 4 只做可解释建议和结构化周报：LLM 由已有 Agent/skill 调用，Compass 不自动覆盖标签/链接、不实现 Feishu ws；Phase 4 的建议写回必须经过显式确认和 content hash 校验，Phase 1-3 的 score/access/create 合同保持不变。
+Phase 4 已完成可解释标签建议、关联推荐、显式 accept/reject、content hash 过期保护和结构化周报。LLM 仍由已有 Agent/skill 调用，Compass 不自动覆盖标签/链接、不实现 Feishu ws；Phase 1-3 的 score/access/create 合同保持不变。
 
 ## 测试
 
@@ -199,9 +199,9 @@ cd compass-core
 cargo test
 ```
 
-119 个 Rust 测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / FTS5 / FileWatcher / API / 端到端闭环。
+149 个 Rust 测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / 中英文搜索 / FileWatcher / API / Phase 4 契约 / 端到端闭环。
 
-skill 侧另有 18 个 renderer 单测和 14 个 HTTP E2E：
+skill 侧另有 21 个 renderer 单测和 17 个 HTTP E2E（含 Phase 4 边界与混合负载回归）：
 
 ```bash
 cd skills/compass

@@ -436,6 +436,11 @@ pub(crate) async fn feed(
     State(state): State<AppState>,
     Query(q): Query<FeedQuery>,
 ) -> Result<Json<Vec<EntitySummary>>, AppError> {
+    if !matches!(q.mode.as_str(), "explore" | "consolidate" | "strategic") {
+        return Err(AppError::unprocessable(
+            "mode must be explore, consolidate, or strategic",
+        ));
+    }
     let db = state.db.lock().await;
     let entities = db.list_entities()?;
     let mut summaries: Vec<EntitySummary> = entities
@@ -466,7 +471,7 @@ pub(crate) async fn feed(
                 (None, None) => std::cmp::Ordering::Equal,
             });
         }
-        _ => {
+        "explore" => {
             summaries.sort_by(|a, b| {
                 b.composite
                     .unwrap_or(0.0)
@@ -474,6 +479,7 @@ pub(crate) async fn feed(
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
+        _ => unreachable!("feed mode validated above"),
     }
     summaries.truncate(q.limit as usize);
     Ok(Json(summaries))
@@ -571,8 +577,13 @@ pub(crate) async fn search(
 pub(crate) async fn tag_suggestions(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    body: Option<Json<TagSuggestionsRequest>>,
+    Json(request): Json<TagSuggestionsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    if request.candidates.len() > crate::contracts::MAX_SUGGESTIONS_PER_REQUEST {
+        return Err(AppError::unprocessable(
+            "candidates must contain at most 20 items",
+        ));
+    }
     let db = state.db.lock().await;
     let entity = db
         .get_entity(&id)?
@@ -584,7 +595,7 @@ pub(crate) async fn tag_suggestions(
         .map_err(|e| AppError::internal(&format!("解析笔记失败: {e}")))?;
     let content_hash = note_content_hash(&raw)?;
     let existing = frontmatter::extract_tags(&note.frontmatter);
-    let candidates = match body.map(|json| json.0).unwrap_or_default().candidates {
+    let candidates = match request.candidates {
         candidates if candidates.is_empty() => {
             lexical_tag_candidates(&note.frontmatter, &note.body, &existing, &content_hash)
         }
@@ -1190,6 +1201,9 @@ pub(crate) async fn agent_context(
     State(state): State<AppState>,
     Json(req): Json<AgentContextRequest>,
 ) -> Result<Json<AgentContextResponse>, AppError> {
+    if req.task.trim().is_empty() {
+        return Err(AppError::unprocessable("task must not be empty"));
+    }
     let db = state.db.lock().await;
 
     // 1. FTS5 语义召回（最多 3*top_k，留足排序空间）
@@ -1846,10 +1860,14 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let created = tag_suggestions(State(state.clone()), Path("know-tag".to_string()), None)
-            .await
-            .unwrap()
-            .0;
+        let created = tag_suggestions(
+            State(state.clone()),
+            Path("know-tag".to_string()),
+            Json(TagSuggestionsRequest::default()),
+        )
+        .await
+        .unwrap()
+        .0;
         let suggestions = created["suggestions"].as_array().unwrap();
         assert!(!suggestions.is_empty());
         let accept_id = suggestions[0]["suggestion_id"]
@@ -1900,10 +1918,14 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let created = tag_suggestions(State(state.clone()), Path("know-stale".to_string()), None)
-            .await
-            .unwrap()
-            .0;
+        let created = tag_suggestions(
+            State(state.clone()),
+            Path("know-stale".to_string()),
+            Json(TagSuggestionsRequest::default()),
+        )
+        .await
+        .unwrap()
+        .0;
         let suggestion_id = created["suggestions"][0]["suggestion_id"]
             .as_str()
             .unwrap()
@@ -2466,6 +2488,24 @@ mod tests {
         assert_eq!(r[0].id, "know-high", "explore 按 composite 降序");
         assert_eq!(r[1].id, "know-low");
     }
+
+    #[tokio::test]
+    async fn test_feed_rejects_unknown_mode() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let error = feed(
+            State(state),
+            Query(FeedQuery {
+                mode: "invalid".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::Unprocessable(_)));
+    }
+
     #[tokio::test]
     async fn test_entities_top_layer_filter() {
         let dir = tempdir().unwrap();
