@@ -93,7 +93,7 @@ id: know-000001                      # know-/case-/log-/ins- 前缀 + 6位序号
 title: 博弈论基础：纳什均衡
 layer: knowledge                     # direction|knowledge|case|log|insight
 category: [学科系列, 数学, 博弈论]     # 架构层路径（三大界·架构层）
-tags: [#数学, #决策科学, #意识系列]
+tags: [数学, 决策科学, 意识系列] # YAML 字符串；不带 #，兼容 Obsidian tags
 score:                               # ← 引力场（Compass 写回，Dataview 可读）
   interest: 85
   strategy: 92
@@ -269,8 +269,11 @@ Rust 骨架 + frontmatter 读写 + 评分引擎 + SQLite 索引 + FileWatcher + 
 适配 `compass` skill 脚本与 `SKILL.md`（启动命令改 Rust 二进制、衰减描述修正、端口对齐 8080）；打通 飞书 ws→Agent→skill→compass 全链路。
 **验收**：飞书发"记一下 X"→ skill create → vault 新增 .md；"今天有什么"→ feed 卡片返回。
 
-### Phase 4 · 智能增强（可选，按需）
-自动标签建议、关联推荐（LLM/图算法）、认知演化周报。
+### Phase 4 · 智能增强（准备完成，待实现）
+
+自动标签建议、可解释关联推荐、认知演化周报。LLM 继续由已有 Agent/skill 调用；Compass 只提供确定性候选、校验、显式 accept 写回和结构化报告数据。标签/链接不自动覆盖，Feishu ws 不回迁。
+
+实施入口、API 草案、数据迁移要求和验收标准见 [`docs/PHASE4_PREP.md`](PHASE4_PREP.md)。
 
 ### Phase 5 · 打磨
 Dataview 查询模板库、备份（Git 自动提交）、跨端同步（Syncthing/WebDAV）。
@@ -300,9 +303,10 @@ Dataview 查询模板库、备份（Git 自动提交）、跨端同步（Syncthi
 | 风险 | 应对 |
 |------|------|
 | 引擎写 frontmatter 与 Obsidian 编辑冲突 | 文件锁 + 原子写 + 只改 score 块；Obsidian 自动重载外部变更 |
-| 纯 Rust 缺少成熟语义检索 | Phase 1-3 不做语义，用 FTS5；Phase 4 评估 `candle`/`ort` 本地嵌入 |
+| 纯 Rust 缺少成熟语义检索 | Phase 1-3 和 Phase 4 首版使用可解释 FTS/词项/图信号；本地嵌入另立决策，不作为 Phase 4 前置依赖 |
 | skill 脚本是 Python（urllib） | 属已有外部基础设施，非 Compass 二进制；按需适配，不阻塞 Phase 1 |
 | 评分写回触发 Git 频繁 diff | score 块单独；Git 提交合并到每日定时（可配置） |
+| Phase 4 建议误写或泄露 Vault 内容 | 建议只读；accept 校验 content hash；默认 localhost；Agent/LLM 来源显式标记 |
 
 ---
 
