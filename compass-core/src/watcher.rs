@@ -249,6 +249,11 @@ pub(crate) async fn process_single_file(
     };
 
     db.lock().await.upsert_entity(&entity, &note.body)?;
+    let tags = frontmatter::extract_tags(&note.frontmatter);
+    let links = frontmatter::extract_refs(&note.body);
+    db.lock()
+        .await
+        .replace_entity_relationships(&id, &tags, &links)?;
 
     debug!(id = %id, composite = %score.composite, "entity upserted");
 
@@ -543,6 +548,46 @@ mod tests {
         let entity = db.lock().await.get_entity("know-000001").unwrap().unwrap();
         assert_eq!(entity.title.as_deref(), Some("Test"));
         assert!((entity.composite.unwrap() - 85.5).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_process_single_file_rebuilds_tags_and_links() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let path = vault.join("know-000001.md");
+        let first = "---\nid: know-000001\ntitle: Test\ntags:\n  - Rust\n  - '#rust'\nscore:\n  interest: 85.0\n  strategy: 90.0\n  consensus: 80.0\n  composite: 85.5\n  updated_at: '2026-07-06T00:00:00Z'\n  last_boosted_at: '2026-07-06T00:00:00Z'\n  access_count: 5\n---\nLinks [[know-000002]].\n";
+        fs::write(&path, first).unwrap();
+
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let weights = Weights::default();
+        process_single_file(&vault, &db, &weights, &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.lock().await.entity_tags("know-000001").unwrap(),
+            vec!["Rust"]
+        );
+        assert_eq!(
+            db.lock().await.entity_links("know-000001").unwrap(),
+            vec!["know-000002"]
+        );
+
+        let second = first
+            .replace("  - Rust\n  - '#rust'", "  - SQLite")
+            .replace("[[know-000002]]", "[[know-000003]]");
+        fs::write(&path, second).unwrap();
+        process_single_file(&vault, &db, &weights, &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.lock().await.entity_tags("know-000001").unwrap(),
+            vec!["SQLite"]
+        );
+        assert_eq!(
+            db.lock().await.entity_links("know-000001").unwrap(),
+            vec!["know-000003"]
+        );
     }
 
     #[tokio::test]

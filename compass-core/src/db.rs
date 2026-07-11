@@ -82,7 +82,7 @@ pub struct Db {
     conn: Connection,
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 impl Db {
     /// 打开（或创建）数据库文件并初始化 schema。父目录自动创建。
@@ -236,9 +236,67 @@ impl Db {
         if let Some(rid) = rowid {
             tx.execute("DELETE FROM entities_fts WHERE rowid = ?1", params![rid])?;
         }
+        tx.execute("DELETE FROM entity_tags WHERE entity_id = ?1", params![id])?;
+        tx.execute(
+            "DELETE FROM entity_links WHERE source_id = ?1 OR target_id = ?1",
+            params![id],
+        )?;
         tx.execute("DELETE FROM entities WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn replace_entity_relationships(
+        &self,
+        entity_id: &str,
+        tags: &[String],
+        links: &[String],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM entity_tags WHERE entity_id = ?1",
+            params![entity_id],
+        )?;
+        tx.execute(
+            "DELETE FROM entity_links WHERE source_id = ?1",
+            params![entity_id],
+        )?;
+        for tag in tags {
+            tx.execute(
+                "INSERT OR IGNORE INTO entity_tags (entity_id, tag, tag_key)
+                 VALUES (?1, ?2, ?3)",
+                params![entity_id, tag, tag.to_lowercase()],
+            )?;
+        }
+        for target_id in links {
+            tx.execute(
+                "INSERT OR IGNORE INTO entity_links (source_id, target_id)
+                 VALUES (?1, ?2)",
+                params![entity_id, target_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn entity_tags(&self, entity_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tag FROM entity_tags WHERE entity_id = ?1 ORDER BY tag_key, tag")?;
+        let rows = stmt.query_map(params![entity_id], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    #[allow(dead_code)]
+    pub fn entity_links(&self, entity_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT target_id FROM entity_links WHERE source_id = ?1 ORDER BY target_id",
+        )?;
+        let rows = stmt.query_map(params![entity_id], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// FTS5 搜索。query 按空白拆词、各自加引号后 AND 连接（避免 `-`/`*` 等被当作 FTS 语法）。
@@ -321,22 +379,29 @@ impl Db {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute("DELETE FROM entities", [])?;
             tx.execute("DELETE FROM entities_fts", [])?;
+            tx.execute("DELETE FROM entity_tags", [])?;
+            tx.execute("DELETE FROM entity_links", [])?;
             tx.commit()?;
         }
         let mut stats = RebuildStats::default();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for path in walk_md(vault)? {
             match parse_entity(vault, &path) {
-                Ok(Some((row, body))) => {
-                    if !seen.insert(row.id.clone()) {
-                        tracing::warn!(id = %row.id, path = %path.display(), "重复 id，跳过后续文件");
+                Ok(Some(parsed)) => {
+                    if !seen.insert(parsed.row.id.clone()) {
+                        tracing::warn!(id = %parsed.row.id, path = %path.display(), "重复 id，跳过后续文件");
                         stats.duplicates += 1;
                         continue;
                     }
-                    if let Err(e) = self.upsert_entity(&row, &body) {
+                    if let Err(e) = self.upsert_entity(&parsed.row, &parsed.body) {
                         tracing::warn!(path = %path.display(), err = %e, "索引写入失败，跳过");
                         stats.skipped += 1;
                     } else {
+                        self.replace_entity_relationships(
+                            &parsed.row.id,
+                            &parsed.tags,
+                            &parsed.links,
+                        )?;
                         stats.indexed += 1;
                     }
                 }
@@ -414,6 +479,23 @@ fn apply_migration(tx: &Transaction<'_>, version: i64) -> Result<()> {
              );
              CREATE INDEX IF NOT EXISTS idx_suggestions_entity_status
                ON suggestions(entity_id, status);",
+        )?,
+        2 => tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS entity_tags (
+               entity_id TEXT NOT NULL,
+               tag TEXT NOT NULL,
+               tag_key TEXT NOT NULL,
+               PRIMARY KEY (entity_id, tag_key),
+               FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_entity_tags_tag_key ON entity_tags(tag_key);
+             CREATE TABLE IF NOT EXISTS entity_links (
+               source_id TEXT NOT NULL,
+               target_id TEXT NOT NULL,
+               PRIMARY KEY (source_id, target_id),
+               FOREIGN KEY (source_id) REFERENCES entities(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_entity_links_target ON entity_links(target_id);",
         )?,
         unsupported => {
             return Err(anyhow::anyhow!("unsupported schema migration {unsupported}"));
@@ -517,7 +599,14 @@ fn walk_md_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 /// 解析单个笔记 → EntityRow（+ 正文）。无 `id` 字段返回 None（跳过）。
-fn parse_entity(vault: &Path, path: &Path) -> Result<Option<(EntityRow, String)>> {
+struct ParsedEntity {
+    row: EntityRow,
+    body: String,
+    tags: Vec<String>,
+    links: Vec<String>,
+}
+
+fn parse_entity(vault: &Path, path: &Path) -> Result<Option<ParsedEntity>> {
     let note = frontmatter::read_note(path)?;
     let fm: serde_yaml::Value =
         serde_yaml::from_str(&note.frontmatter).context("解析 frontmatter 失败")?;
@@ -555,7 +644,14 @@ fn parse_entity(vault: &Path, path: &Path) -> Result<Option<(EntityRow, String)>
         content_hash: Some(content_hash(&note.body)),
         updated_at: score.as_ref().map(|s| s.updated_at.clone()),
     };
-    Ok(Some((row, note.body)))
+    let tags = frontmatter::extract_tags(&note.frontmatter);
+    let links = frontmatter::extract_refs(&note.body);
+    Ok(Some(ParsedEntity {
+        row,
+        body: note.body,
+        tags,
+        links,
+    }))
 }
 
 #[cfg(test)]
@@ -614,6 +710,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(suggestion_tables, 1);
+    }
+
+    #[test]
+    fn entity_relationship_indexes_are_replaceable_and_deletable() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_entity(&sample_row("know-1"), "body").unwrap();
+        db.replace_entity_relationships(
+            "know-1",
+            &["Rust".to_string(), "rust".to_string(), "SQLite".to_string()],
+            &["know-2".to_string(), "know-2".to_string()],
+        )
+        .unwrap();
+        assert_eq!(db.entity_tags("know-1").unwrap(), vec!["Rust", "SQLite"]);
+        assert_eq!(db.entity_links("know-1").unwrap(), vec!["know-2"]);
+
+        db.replace_entity_relationships("know-1", &["New".to_string()], &[])
+            .unwrap();
+        assert_eq!(db.entity_tags("know-1").unwrap(), vec!["New"]);
+        assert!(db.entity_links("know-1").unwrap().is_empty());
+
+        db.delete_entity("know-1").unwrap();
+        assert!(db.entity_tags("know-1").unwrap().is_empty());
     }
 
     #[test]
@@ -956,11 +1074,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let vault = dir.path().join("vault");
         fs::create_dir_all(&vault).unwrap();
-        fs::write(
-            vault.join("know-000001.md"),
-            md_with_id("know-000001", "Game Theory", "Nash equilibrium is core."),
-        )
-        .unwrap();
+        let note = md_with_id("know-000001", "Game Theory", "Nash equilibrium is core.")
+            .replace(
+                "title: Game Theory\n",
+                "title: Game Theory\ntags:\n  - Rust\n  - '#rust'\n",
+            )
+            .replace(
+                "Nash equilibrium is core.",
+                "Nash equilibrium is core. [[know-000002]]",
+            );
+        fs::write(vault.join("know-000001.md"), note).unwrap();
         fs::write(vault.join("noid.md"), md_without_id("No ID")).unwrap();
 
         let db = Db::open_in_memory().unwrap();
@@ -974,6 +1097,8 @@ mod tests {
         assert!((got.composite.unwrap() - 85.3).abs() < 1e-9);
         assert_eq!(got.access_count, 12);
         assert!(got.content_hash.is_some());
+        assert_eq!(db.entity_tags("know-000001").unwrap(), vec!["Rust"]);
+        assert_eq!(db.entity_links("know-000001").unwrap(), vec!["know-000002"]);
 
         // FTS 可查
         let hits = db.fts_search("Nash", 10).unwrap();

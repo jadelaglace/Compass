@@ -162,6 +162,36 @@ pub fn extract_refs(body: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extract frontmatter tags as canonical values without a leading `#`.
+pub fn extract_tags(frontmatter: &str) -> Vec<String> {
+    let Ok(value) = serde_yaml::from_str::<Value>(frontmatter) else {
+        return Vec::new();
+    };
+    let Some(tags) = value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(Value::String("tags".into())))
+    else {
+        return Vec::new();
+    };
+    let values = match tags {
+        Value::Sequence(values) => values.iter().filter_map(Value::as_str).collect(),
+        Value::String(value) => vec![value.as_str()],
+        _ => Vec::new(),
+    };
+    let mut result: Vec<String> = Vec::new();
+    for value in values {
+        let value = value.trim().trim_start_matches('#').trim();
+        if !value.is_empty()
+            && !result
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(value))
+        {
+            result.push(value.to_string());
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +343,12 @@ mod tests {
         let (fm, body) = split_frontmatter(&md).unwrap();
         assert!(fm.contains("id: know-000001"));
         assert!(body.contains("# Game Theory"));
+    }
+
+    #[test]
+    fn test_extract_tags_normalizes_and_deduplicates() {
+        let tags = extract_tags("tags:\n  - Rust\n  - '#rust'\n  - sqlite\n");
+        assert_eq!(tags, vec!["Rust", "sqlite"]);
+        assert_eq!(extract_tags("tags: knowledge\n"), vec!["knowledge"]);
     }
 }
