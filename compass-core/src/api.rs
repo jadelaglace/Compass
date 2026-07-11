@@ -6,9 +6,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::http::{header::AUTHORIZATION, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -708,13 +709,56 @@ pub fn router_from_config(cfg: Arc<Config>, db: Arc<Mutex<Db>>) -> Router {
         weights: cfg.weights,
     };
     router(state)
+        .layer(DefaultBodyLimit::max(cfg.request_body_limit_bytes))
+        .layer(middleware::from_fn_with_state(
+            cfg.auth_token.clone(),
+            require_auth,
+        ))
+}
+
+async fn require_auth(
+    State(expected): State<Option<String>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let authorized = expected.as_deref().is_none_or(|expected| {
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
+    });
+
+    if !authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "authentication required"})),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
     use std::fs;
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
     fn setup_state(vault: &std::path::Path) -> AppState {
         AppState {
@@ -746,6 +790,75 @@ mod tests {
             content_hash: Some("abc".to_string()),
             updated_at: Some("2026-07-09T00:00:00Z".to_string()),
         }
+    }
+
+    fn test_config(vault: &std::path::Path, auth_token: Option<&str>, limit: usize) -> Config {
+        Config {
+            vault_path: vault.to_path_buf(),
+            bind: "127.0.0.1".to_string(),
+            port: 8080,
+            allow_non_local: false,
+            auth_token: auth_token.map(str::to_string),
+            request_body_limit_bytes: limit,
+            db_path: None,
+            decay: crate::config::DecayConfig::default(),
+            weights: Weights::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_authentication_middleware() {
+        let dir = tempdir().unwrap();
+        let cfg = Arc::new(test_config(dir.path(), Some("test-secret"), 1024));
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let app = router_from_config(cfg, db);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("authorization", "Bearer test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_http_request_body_limit() {
+        let dir = tempdir().unwrap();
+        let cfg = Arc::new(test_config(dir.path(), None, 64));
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let app = router_from_config(cfg, db);
+        let body =
+            r#"{"title":"a note whose request is intentionally too large","content":"body"}"#;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/entities")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]

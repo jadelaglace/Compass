@@ -7,8 +7,16 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub vault_path: PathBuf,
+    #[serde(default = "default_bind")]
+    pub bind: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default)]
+    pub allow_non_local: bool,
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    #[serde(default = "default_request_body_limit_bytes")]
+    pub request_body_limit_bytes: usize,
     /// SQLite 索引库路径。相对配置文件目录解析；缺省 `.compass/index.db`。
     #[serde(default)]
     pub db_path: Option<PathBuf>,
@@ -32,6 +40,12 @@ pub struct DecayConfig {
 
 fn default_port() -> u16 {
     8080
+}
+fn default_bind() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_request_body_limit_bytes() -> usize {
+    1024 * 1024
 }
 fn default_rate() -> f64 {
     0.98
@@ -71,6 +85,8 @@ impl Config {
             toml::from_str(&raw).map_err(|e| anyhow::anyhow!("解析配置失败: {e}"))?;
 
         // F3: 校验权重归一化
+        cfg.validate_server_settings()?;
+
         if !cfg.weights.is_normalized() {
             return Err(anyhow::anyhow!(
                 "weights 归一化错误：和为 {}，应为 1.0（检查 compass.toml [weights]）",
@@ -110,5 +126,86 @@ impl Config {
         cfg.db_path = Some(db_path);
 
         Ok(cfg)
+    }
+
+    fn validate_server_settings(&self) -> anyhow::Result<()> {
+        if self.bind.trim().is_empty() {
+            return Err(anyhow::anyhow!("bind cannot be empty"));
+        }
+        if self.request_body_limit_bytes == 0 {
+            return Err(anyhow::anyhow!(
+                "request_body_limit_bytes must be greater than zero"
+            ));
+        }
+        if self.auth_token.as_deref().is_some_and(str::is_empty) {
+            return Err(anyhow::anyhow!("auth_token cannot be empty"));
+        }
+        if !is_local_bind(&self.bind) && !self.allow_non_local {
+            return Err(anyhow::anyhow!(
+                "non-local bind ({}) requires allow_non_local = true",
+                self.bind
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_local_bind(bind: &str) -> bool {
+    bind.eq_ignore_ascii_case("localhost")
+        || bind
+            .parse::<std::net::IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(bind: &str, allow_non_local: bool) -> Config {
+        Config {
+            vault_path: PathBuf::from("vault"),
+            bind: bind.to_string(),
+            port: 8080,
+            allow_non_local,
+            auth_token: None,
+            request_body_limit_bytes: default_request_body_limit_bytes(),
+            db_path: None,
+            decay: DecayConfig::default(),
+            weights: Weights::default(),
+        }
+    }
+
+    #[test]
+    fn default_server_settings_are_local_only() {
+        assert_eq!(default_bind(), "127.0.0.1");
+        assert!(is_local_bind("127.0.0.1"));
+        assert!(is_local_bind("::1"));
+        assert!(is_local_bind("localhost"));
+        assert!(!is_local_bind("0.0.0.0"));
+        assert_eq!(default_request_body_limit_bytes(), 1024 * 1024);
+        assert!(config("127.0.0.1", false)
+            .validate_server_settings()
+            .is_ok());
+    }
+
+    #[test]
+    fn non_local_bind_requires_explicit_opt_in() {
+        let invalid = config("0.0.0.0", false);
+        let error = invalid.validate_server_settings().unwrap_err().to_string();
+        assert!(error.contains("allow_non_local"));
+
+        assert!(config("0.0.0.0", true).validate_server_settings().is_ok());
+    }
+
+    #[test]
+    fn invalid_server_settings_are_rejected() {
+        let mut config = config("127.0.0.1", false);
+        config.request_body_limit_bytes = 0;
+        assert!(config.validate_server_settings().is_err());
+
+        config.request_body_limit_bytes = default_request_body_limit_bytes();
+        config.auth_token = Some(String::new());
+        assert!(config.validate_server_settings().is_err());
     }
 }

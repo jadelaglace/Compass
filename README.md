@@ -45,7 +45,11 @@ cargo build --release
 
 ```toml
 vault_path = "../vault"      # Obsidian vault 路径（相对配置文件）
+bind = "127.0.0.1"           # 默认仅本机访问
 port = 8080                  # HTTP API 端口
+allow_non_local = false      # 非本机监听必须显式改为 true
+# auth_token = "replace-with-a-secret"  # 配置后需 Authorization: Bearer <token>
+request_body_limit_bytes = 1048576
 
 [weights]                    # 三维默认权重（sum=1.0）
 interest = 0.40
@@ -70,6 +74,10 @@ cargo run --release
 - 自动从 vault 全量重建索引
 - FileWatcher 监听 vault 变更（新建/修改/删除）
 - HTTP API 监听 `http://localhost:8080`
+
+默认只监听本机回环地址。若需局域网或其他非本机访问，必须显式设置 `bind` 和
+`allow_non_local = true`；建议同时配置 `auth_token`，否则任何可达客户端都能读取
+Vault 内容并调用已有写接口。所有 JSON 请求默认限制为 1 MiB。
 
 ## API 端点
 

@@ -28,8 +28,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::Config::load()?;
-    let addr = format!("0.0.0.0:{}", cfg.port);
-    info!(vault = %cfg.vault_path.display(), port = cfg.port, "Compass starting");
+    let addr = format!("{}:{}", cfg.bind, cfg.port);
+    info!(vault = %cfg.vault_path.display(), bind = %cfg.bind, port = cfg.port, "Compass starting");
 
     // 初始化 DB
     let db_path = cfg
