@@ -1,0 +1,11 @@
+{
+  "suggestion_id": "sug-ec4400c3246dabb564e4ade7bf07eb7a5912415d4001192e60d97b919ffd3a91",
+  "entity_id": "know-000001",
+  "tag": "decision science",
+  "confidence": 0.82,
+  "reason": "title and body term overlap",
+  "source": "rust_lexical",
+  "algorithm_version": "tags-v1",
+  "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "status": "pending"
+}

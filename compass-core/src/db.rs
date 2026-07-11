@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 use crate::frontmatter;
 
@@ -82,6 +82,8 @@ pub struct Db {
     conn: Connection,
 }
 
+const CURRENT_SCHEMA_VERSION: i64 = 1;
+
 impl Db {
     /// 打开（或创建）数据库文件并初始化 schema。父目录自动创建。
     pub fn open(path: &Path) -> Result<Self> {
@@ -91,6 +93,7 @@ impl Db {
                     .with_context(|| format!("创建 db 父目录失败 {}", parent.display()))?;
             }
         }
+        backup_before_migration(path)?;
         let conn =
             Connection::open(path).with_context(|| format!("打开数据库失败 {}", path.display()))?;
         let db = Self { conn };
@@ -108,48 +111,46 @@ impl Db {
     }
 
     fn init_schema(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA foreign_keys=ON;
-             CREATE TABLE IF NOT EXISTS entities (
-               id TEXT PRIMARY KEY,
-               file_path TEXT UNIQUE NOT NULL,
-               title TEXT,
-               layer TEXT,
-               status TEXT,
-               interest REAL,
-               strategy REAL,
-               consensus REAL,
-               composite REAL,
-               access_count INTEGER NOT NULL DEFAULT 0,
-               last_boosted_at TEXT,
-               content_hash TEXT,
-               updated_at TEXT
-             );
-             CREATE TABLE IF NOT EXISTS score_history (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               entity_id TEXT NOT NULL,
-               dimension TEXT,
-               old REAL,
-               new REAL,
-               reason TEXT,
-               trigger TEXT,
-               created_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS timeline (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               entity_id TEXT NOT NULL,
-               event_type TEXT NOT NULL,
-               intensity REAL,
-               source TEXT,
-               created_at TEXT NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_score_history_entity ON score_history(entity_id);
-             CREATE INDEX IF NOT EXISTS idx_score_history_trigger ON score_history(entity_id, trigger);
-             CREATE INDEX IF NOT EXISTS idx_timeline_entity ON timeline(entity_id);
-             CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(title, content);",
+        self.conn
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               version INTEGER NOT NULL
+             );",
         )?;
+        let current = tx
+            .query_row(
+                "SELECT version FROM schema_version WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if current > CURRENT_SCHEMA_VERSION {
+            return Err(anyhow::anyhow!(
+                "database schema version {current} is newer than supported version {CURRENT_SCHEMA_VERSION}"
+            ));
+        }
+        for version in (current + 1)..=CURRENT_SCHEMA_VERSION {
+            apply_migration(&tx, version)?;
+        }
+        tx.execute(
+            "INSERT INTO schema_version (id, version) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+            params![CURRENT_SCHEMA_VERSION],
+        )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT version FROM schema_version WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     /// upsert entity 并同步 FTS（`fts_content` = Markdown 正文，供 FTS 索引与 snippet）。
@@ -350,6 +351,104 @@ impl Db {
     }
 }
 
+fn apply_migration(tx: &Transaction<'_>, version: i64) -> Result<()> {
+    match version {
+        #[cfg(test)]
+        99 => {
+            tx.execute_batch("CREATE TABLE migration_probe (value TEXT);")?;
+            return Err(anyhow::anyhow!("injected migration failure"));
+        }
+        1 => tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS entities (
+               id TEXT PRIMARY KEY,
+               file_path TEXT UNIQUE NOT NULL,
+               title TEXT,
+               layer TEXT,
+               status TEXT,
+               interest REAL,
+               strategy REAL,
+               consensus REAL,
+               composite REAL,
+               access_count INTEGER NOT NULL DEFAULT 0,
+               last_boosted_at TEXT,
+               content_hash TEXT,
+               updated_at TEXT
+             );
+             CREATE TABLE IF NOT EXISTS score_history (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               entity_id TEXT NOT NULL,
+               dimension TEXT,
+               old REAL,
+               new REAL,
+               reason TEXT,
+               trigger TEXT,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS timeline (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               entity_id TEXT NOT NULL,
+               event_type TEXT NOT NULL,
+               intensity REAL,
+               source TEXT,
+               created_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_score_history_entity ON score_history(entity_id);
+             CREATE INDEX IF NOT EXISTS idx_score_history_trigger ON score_history(entity_id, trigger);
+             CREATE INDEX IF NOT EXISTS idx_timeline_entity ON timeline(entity_id);
+             CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(title, content);
+             CREATE TABLE IF NOT EXISTS suggestions (
+               suggestion_id TEXT PRIMARY KEY,
+               kind TEXT NOT NULL CHECK (kind IN ('tag', 'related')),
+               entity_id TEXT NOT NULL,
+               candidate TEXT NOT NULL,
+               candidate_key TEXT NOT NULL,
+               confidence REAL,
+               reason TEXT NOT NULL,
+               source TEXT NOT NULL,
+               algorithm_version TEXT NOT NULL,
+               content_hash TEXT NOT NULL,
+               status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               UNIQUE(kind, entity_id, candidate_key, content_hash, algorithm_version, source)
+             );
+             CREATE INDEX IF NOT EXISTS idx_suggestions_entity_status
+               ON suggestions(entity_id, status);",
+        )?,
+        unsupported => {
+            return Err(anyhow::anyhow!("unsupported schema migration {unsupported}"));
+        }
+    }
+    Ok(())
+}
+
+fn backup_before_migration(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(path)?;
+    let current = conn
+        .query_row(
+            "SELECT version FROM schema_version WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    if current.unwrap_or(0) >= CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let backup_path = path.with_extension("db.pre-migration.bak");
+    fs::copy(path, &backup_path).with_context(|| {
+        format!(
+            "create database migration backup failed {}",
+            backup_path.display()
+        )
+    })?;
+    Ok(())
+}
+
 fn row_to_entity(r: &Row) -> rusqlite::Result<EntityRow> {
     Ok(EntityRow {
         id: r.get(0)?,
@@ -497,6 +596,97 @@ mod tests {
             content_hash: Some("abc".into()),
             updated_at: Some("2026-07-05T10:00:00+08:00".into()),
         }
+    }
+
+    #[test]
+    fn schema_migrations_are_repeatable() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        db.init_schema().unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+
+        let suggestion_tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'suggestions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(suggestion_tables, 1);
+    }
+
+    #[test]
+    fn legacy_database_is_backed_up_before_migration() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE entities (
+                   id TEXT PRIMARY KEY, file_path TEXT UNIQUE NOT NULL, title TEXT,
+                   layer TEXT, status TEXT, interest REAL, strategy REAL,
+                   consensus REAL, composite REAL, access_count INTEGER NOT NULL DEFAULT 0,
+                   last_boosted_at TEXT, content_hash TEXT, updated_at TEXT
+                 );
+                 CREATE TABLE score_history (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id TEXT NOT NULL,
+                   dimension TEXT, old REAL, new REAL, reason TEXT, trigger TEXT,
+                   created_at TEXT NOT NULL
+                 );
+                 CREATE TABLE timeline (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id TEXT NOT NULL,
+                   event_type TEXT NOT NULL, intensity REAL, source TEXT,
+                   created_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_score_history_entity ON score_history(entity_id);
+                 CREATE INDEX idx_score_history_trigger ON score_history(entity_id, trigger);
+                 CREATE INDEX idx_timeline_entity ON timeline(entity_id);
+                 CREATE VIRTUAL TABLE entities_fts USING fts5(title, content);
+                 INSERT INTO entities (id, file_path, title, access_count)
+                   VALUES ('know-legacy', 'legacy.md', 'Legacy', 0);",
+            )
+            .unwrap();
+        }
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let db = Db::open(&path).unwrap();
+        let backup = path.with_extension("db.pre-migration.bak");
+        assert!(backup.exists());
+        assert_eq!(fs::read(&backup).unwrap(), before);
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        let legacy_entity: String = db
+            .conn
+            .query_row(
+                "SELECT id FROM entities WHERE id = 'know-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_entity, "know-legacy");
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_schema_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        let db = Db { conn };
+        let tx = db.conn.unchecked_transaction().unwrap();
+
+        assert!(apply_migration(&tx, 99).is_err());
+        drop(tx);
+        let probe_table_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'migration_probe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(probe_table_count, 0);
     }
 
     #[test]
