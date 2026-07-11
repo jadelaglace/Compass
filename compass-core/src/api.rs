@@ -3,7 +3,7 @@
 //! 字段统一（#160）：响应用 `id`/`composite`（PRD v3.0），非 v2.x 的 `entity_id`/`final_score`。
 //! 写回端点（score/access/create）：读 frontmatter -> 改 score -> 原子写回 -> 更新 SQLite。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,8 +19,9 @@ use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::contracts::{
-    candidate_key, note_content_hash, stable_suggestion_id, SuggestionKind, SuggestionStatus,
-    TagSuggestion, TAG_ALGORITHM_VERSION,
+    candidate_key, note_content_hash, stable_suggestion_id, RelatedSignals, RelatedSuggestion,
+    SuggestionKind, SuggestionStatus, TagSuggestion, RELATED_ALGORITHM_VERSION,
+    TAG_ALGORITHM_VERSION,
 };
 use crate::db::{Db, EntityRow, SuggestionRow};
 use crate::frontmatter::{self, MetadataPatch, MetadataPatchError};
@@ -195,6 +196,16 @@ pub struct TagCandidateRequest {
     pub content_hash: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RelatedQuery {
+    #[serde(default = "default_related_limit")]
+    pub limit: u32,
+}
+
+fn default_related_limit() -> u32 {
+    10
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -210,6 +221,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/tag-suggestions/:suggestion_id/reject",
             post(reject_tag_suggestion),
+        )
+        .route("/entities/:id/related", get(related_entities))
+        .route(
+            "/related-suggestions/:suggestion_id/accept",
+            post(accept_related_suggestion),
+        )
+        .route(
+            "/related-suggestions/:suggestion_id/reject",
+            post(reject_related_suggestion),
         )
         .route("/entities", post(create_entity))
         .route("/entities/:id/score", patch(update_score))
@@ -545,6 +565,244 @@ pub(crate) async fn reject_tag_suggestion(
         .get_suggestion(&suggestion.suggestion_id)?
         .ok_or_else(|| AppError::internal("rejected suggestion disappeared"))?;
     Ok(Json(tag_suggestion_json(&updated)?))
+}
+
+pub(crate) async fn related_entities(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<RelatedQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().await;
+    let source = db
+        .get_entity(&id)?
+        .ok_or_else(|| AppError::not_found(&id))?;
+    let source_path = state.vault.join(&source.file_path);
+    let source_raw = std::fs::read_to_string(&source_path)
+        .map_err(|e| AppError::internal(&format!("读取笔记失败: {e}")))?;
+    let source_note = frontmatter::read_note(&source_path)
+        .map_err(|e| AppError::internal(&format!("解析笔记失败: {e}")))?;
+    let source_hash = note_content_hash(&source_raw)?;
+    let source_terms = lexical_term_set(&source_note.frontmatter, &source_note.body);
+    let source_tags = frontmatter::extract_tags(&source_note.frontmatter)
+        .into_iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<HashSet<_>>();
+    let source_neighbors = db
+        .directly_linked_entities(&id)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut ranked = Vec::new();
+
+    for candidate in db.list_entities()? {
+        if candidate.id == id
+            || candidate
+                .status
+                .as_deref()
+                .is_some_and(|status| status.eq_ignore_ascii_case("archived"))
+            || source_neighbors.contains(&candidate.id)
+        {
+            continue;
+        }
+        let candidate_path = state.vault.join(&candidate.file_path);
+        let Ok(candidate_note) = frontmatter::read_note(&candidate_path) else {
+            continue;
+        };
+        let candidate_terms = lexical_term_set(&candidate_note.frontmatter, &candidate_note.body);
+        let candidate_tags = frontmatter::extract_tags(&candidate_note.frontmatter)
+            .into_iter()
+            .map(|tag| tag.to_lowercase())
+            .collect::<HashSet<_>>();
+        let term_overlap = source_terms.intersection(&candidate_terms).count();
+        let tag_overlap = source_tags.intersection(&candidate_tags).count();
+        let candidate_neighbors = db
+            .directly_linked_entities(&candidate.id)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let shared_neighbors = source_neighbors.intersection(&candidate_neighbors).count();
+        let term_signal = (term_overlap as f64 / 5.0).min(1.0) * 0.45;
+        let tag_signal = (tag_overlap as f64 / 3.0).min(1.0) * 0.30;
+        let graph_signal = (shared_neighbors as f64 / 2.0).min(1.0) * 0.15;
+        let composite_signal =
+            (candidate.composite.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0) * 0.10;
+        let score = term_signal + tag_signal + graph_signal + composite_signal;
+        if score <= 0.0 {
+            continue;
+        }
+        let mut reasons = Vec::new();
+        if term_overlap > 0 {
+            reasons.push(format!("shared terms: {term_overlap}"));
+        }
+        if tag_overlap > 0 {
+            reasons.push(format!("shared tags: {tag_overlap}"));
+        }
+        if shared_neighbors > 0 {
+            reasons.push(format!("shared graph neighbors: {shared_neighbors}"));
+        }
+        reasons.push(format!("composite signal: {:.3}", composite_signal));
+        let signals = RelatedSignals {
+            term_overlap,
+            tag_overlap,
+            shared_neighbors,
+            term_signal,
+            tag_signal,
+            graph_signal,
+            composite_signal,
+        };
+        ranked.push((candidate, score, reasons, signals));
+    }
+
+    ranked.sort_by(|(left, left_score, _, _), (right, right_score, _, _)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    ranked.truncate(query.limit.min(20) as usize);
+
+    let mut suggestions = Vec::new();
+    for (candidate, score, reasons, signals) in ranked {
+        let reason = serde_json::to_string(&serde_json::json!({
+            "reasons": reasons,
+            "signals": signals,
+        }))
+        .map_err(|e| AppError::internal(&format!("serialize reasons failed: {e}")))?;
+        let suggestion = SuggestionRow {
+            suggestion_id: stable_suggestion_id(
+                SuggestionKind::Related,
+                &id,
+                &candidate.id,
+                &source_hash,
+                RELATED_ALGORITHM_VERSION,
+                "rust_lexical",
+            ),
+            kind: "related".to_string(),
+            entity_id: id.clone(),
+            candidate: candidate.id.clone(),
+            candidate_key: candidate_key(SuggestionKind::Related, &candidate.id),
+            confidence: Some(score),
+            reason,
+            source: "rust_lexical".to_string(),
+            algorithm_version: RELATED_ALGORITHM_VERSION.to_string(),
+            content_hash: source_hash.clone(),
+            status: "pending".to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        db.upsert_suggestion(&suggestion)?;
+        if let Some(row) = db.get_suggestion(&suggestion.suggestion_id)? {
+            suggestions.push(related_suggestion_json(&row, &candidate, score)?);
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "entity_id": id,
+        "content_hash": source_hash,
+        "suggestions": suggestions,
+    })))
+}
+
+pub(crate) async fn accept_related_suggestion(
+    State(state): State<AppState>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().await;
+    let suggestion = db
+        .get_suggestion(&suggestion_id)?
+        .ok_or_else(|| AppError::not_found(&suggestion_id))?;
+    ensure_suggestion_kind(&suggestion, "related")?;
+    match suggestion.status.as_str() {
+        "accepted" | "expired" => {
+            let target = db.get_entity(&suggestion.candidate)?;
+            return Ok(Json(related_suggestion_json_from_row(
+                &suggestion,
+                target.as_ref(),
+            )?));
+        }
+        "rejected" => {
+            return Err(AppError::conflict(
+                "suggestion_rejected",
+                "rejected suggestion cannot be accepted",
+            ));
+        }
+        "pending" => {}
+        _ => return Err(AppError::internal("invalid suggestion status")),
+    }
+    let source = db
+        .get_entity(&suggestion.entity_id)?
+        .ok_or_else(|| AppError::not_found(&suggestion.entity_id))?;
+    db.get_entity(&suggestion.candidate)?
+        .ok_or_else(|| AppError::not_found(&suggestion.candidate))?;
+    let file_path = state.vault.join(&source.file_path);
+    let raw = std::fs::read_to_string(&file_path)
+        .map_err(|e| AppError::internal(&format!("读取笔记失败: {e}")))?;
+    if note_content_hash(&raw)? != suggestion.content_hash {
+        expire_suggestion(&db, &suggestion.suggestion_id)?;
+        return Err(AppError::conflict(
+            "suggestion_expired",
+            "suggestion content hash is stale",
+        ));
+    }
+    let result = frontmatter::patch_metadata(
+        &file_path,
+        &suggestion.content_hash,
+        &[MetadataPatch::AddLink(suggestion.candidate.clone())],
+    )
+    .map_err(map_metadata_patch_error)?;
+    refresh_relationship_index(&db, &suggestion.entity_id, &file_path)?;
+    db.update_suggestion_status(
+        &suggestion.suggestion_id,
+        "accepted",
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    let updated = db
+        .get_suggestion(&suggestion.suggestion_id)?
+        .ok_or_else(|| AppError::internal("accepted suggestion disappeared"))?;
+    let target = db.get_entity(&suggestion.candidate)?;
+    let mut response = related_suggestion_json_from_row(&updated, target.as_ref())?;
+    response["changed"] = serde_json::json!(result.changed);
+    response["content_hash"] = serde_json::json!(result.content_hash);
+    Ok(Json(response))
+}
+
+pub(crate) async fn reject_related_suggestion(
+    State(state): State<AppState>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().await;
+    let suggestion = db
+        .get_suggestion(&suggestion_id)?
+        .ok_or_else(|| AppError::not_found(&suggestion_id))?;
+    ensure_suggestion_kind(&suggestion, "related")?;
+    match suggestion.status.as_str() {
+        "accepted" => {
+            return Err(AppError::conflict(
+                "suggestion_accepted",
+                "accepted suggestion cannot be rejected",
+            ));
+        }
+        "rejected" | "expired" => {
+            let target = db.get_entity(&suggestion.candidate)?;
+            return Ok(Json(related_suggestion_json_from_row(
+                &suggestion,
+                target.as_ref(),
+            )?));
+        }
+        "pending" => {}
+        _ => return Err(AppError::internal("invalid suggestion status")),
+    }
+    db.update_suggestion_status(
+        &suggestion.suggestion_id,
+        "rejected",
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    let updated = db
+        .get_suggestion(&suggestion.suggestion_id)?
+        .ok_or_else(|| AppError::internal("rejected suggestion disappeared"))?;
+    let target = db.get_entity(&updated.candidate)?;
+    Ok(Json(related_suggestion_json_from_row(
+        &updated,
+        target.as_ref(),
+    )?))
 }
 
 pub(crate) async fn create_entity(
@@ -937,6 +1195,18 @@ fn add_lexical_terms(frequencies: &mut BTreeMap<String, usize>, text: &str, weig
     flush(&mut current);
 }
 
+fn lexical_term_set(frontmatter: &str, body: &str) -> HashSet<String> {
+    let mut frequencies = BTreeMap::new();
+    if let Some(category) = yaml_scalar(frontmatter, "category") {
+        add_lexical_terms(&mut frequencies, &category, 1);
+    }
+    if let Some(title) = yaml_scalar(frontmatter, "title") {
+        add_lexical_terms(&mut frequencies, &title, 1);
+    }
+    add_lexical_terms(&mut frequencies, body, 1);
+    frequencies.into_keys().collect()
+}
+
 fn is_tag_stopword(term: &str) -> bool {
     matches!(
         term,
@@ -987,6 +1257,51 @@ fn tag_suggestion_json(row: &SuggestionRow) -> Result<serde_json::Value, AppErro
     };
     serde_json::to_value(suggestion)
         .map_err(|e| AppError::internal(&format!("serialize suggestion failed: {e}")))
+}
+
+fn related_suggestion_json(
+    row: &SuggestionRow,
+    candidate: &EntityRow,
+    score: f64,
+) -> Result<serde_json::Value, AppError> {
+    let mut value = related_suggestion_json_from_row(row, Some(candidate))?;
+    value["score"] = serde_json::json!(score);
+    Ok(value)
+}
+
+fn related_suggestion_json_from_row(
+    row: &SuggestionRow,
+    candidate: Option<&EntityRow>,
+) -> Result<serde_json::Value, AppError> {
+    let status = parse_suggestion_status(&row.status)?;
+    let payload = serde_json::from_str::<serde_json::Value>(&row.reason).ok();
+    let reasons = payload
+        .as_ref()
+        .and_then(|value| value.get("reasons"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+        .or_else(|| serde_json::from_str::<Vec<String>>(&row.reason).ok())
+        .unwrap_or_else(|| vec![row.reason.clone()]);
+    let signals = payload
+        .as_ref()
+        .and_then(|value| value.get("signals"))
+        .and_then(|value| serde_json::from_value::<RelatedSignals>(value.clone()).ok())
+        .unwrap_or_default();
+    let suggestion = RelatedSuggestion {
+        suggestion_id: row.suggestion_id.clone(),
+        entity_id: row.entity_id.clone(),
+        id: row.candidate.clone(),
+        title: candidate.and_then(|value| value.title.clone()),
+        composite: candidate.and_then(|value| value.composite),
+        score: row.confidence.unwrap_or(0.0),
+        reasons,
+        signals,
+        content_hash: row.content_hash.clone(),
+        source: row.source.clone(),
+        algorithm_version: row.algorithm_version.clone(),
+        status,
+    };
+    serde_json::to_value(suggestion)
+        .map_err(|e| AppError::internal(&format!("serialize related suggestion failed: {e}")))
 }
 
 fn parse_suggestion_status(status: &str) -> Result<SuggestionStatus, AppError> {
@@ -1414,6 +1729,244 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.status, "expired");
+    }
+
+    #[tokio::test]
+    async fn test_related_recommendations_are_explainable_and_filter_existing_links() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let notes = [
+            (
+                "know-source",
+                "Source",
+                "active",
+                "Rust SQLite architecture",
+                vec!["Rust"],
+                vec!["know-direct"],
+            ),
+            (
+                "know-related",
+                "Related",
+                "active",
+                "Rust SQLite indexing",
+                vec!["Rust", "Index"],
+                Vec::new(),
+            ),
+            (
+                "know-direct",
+                "Already linked",
+                "active",
+                "Rust SQLite direct",
+                vec!["Rust"],
+                Vec::new(),
+            ),
+            (
+                "know-archived",
+                "Archived",
+                "archived",
+                "Rust SQLite archived",
+                vec!["Rust"],
+                Vec::new(),
+            ),
+        ];
+        let db = state.db.lock().await;
+        for (id, title, status, body, tags, links) in &notes {
+            let file_name = format!("{id}.md");
+            let mut note = sample_md(id, title, 70.0, body);
+            note = note.replace("status: active", &format!("status: {status}"));
+            note = note.replace(
+                "score:\n",
+                &format!(
+                    "tags:\n{}\nscore:\n",
+                    tags.iter()
+                        .map(|tag| format!("  - {tag}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            );
+            fs::write(dir.path().join(&file_name), note).unwrap();
+            let mut entity = sample_entity(id, &file_name, 70.0, "knowledge");
+            entity.title = Some((*title).to_string());
+            entity.status = Some((*status).to_string());
+            let tags = tags
+                .iter()
+                .map(|tag| (*tag).to_string())
+                .collect::<Vec<_>>();
+            let links = links
+                .iter()
+                .map(|link| (*link).to_string())
+                .collect::<Vec<_>>();
+            db.upsert_entity_with_relationships(&entity, body, &tags, &links)
+                .unwrap();
+        }
+        drop(db);
+
+        let response = related_entities(
+            State(state),
+            Path("know-source".to_string()),
+            Query(RelatedQuery { limit: 10 }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let suggestions = response["suggestions"].as_array().unwrap();
+        let ids = suggestions
+            .iter()
+            .map(|suggestion| suggestion["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"know-related"));
+        assert!(!ids.contains(&"know-source"));
+        assert!(!ids.contains(&"know-direct"));
+        assert!(!ids.contains(&"know-archived"));
+        let related = suggestions
+            .iter()
+            .find(|suggestion| suggestion["id"] == "know-related")
+            .unwrap();
+        assert!(related["score"].as_f64().unwrap() > 0.0);
+        assert!(!related["reasons"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_related_accept_reject_and_stale_are_idempotent() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let source_path = dir.path().join("source.md");
+        let target_path = dir.path().join("target.md");
+        let reject_path = dir.path().join("reject.md");
+        fs::write(
+            &source_path,
+            sample_md("know-source", "Source", 70.0, "Rust SQLite architecture"),
+        )
+        .unwrap();
+        fs::write(
+            &target_path,
+            sample_md("know-target", "Target", 60.0, "Rust SQLite indexing"),
+        )
+        .unwrap();
+        fs::write(
+            &reject_path,
+            sample_md("know-reject", "Reject", 50.0, "Rust SQLite review"),
+        )
+        .unwrap();
+        let db = state.db.lock().await;
+        for (id, path, title, body, score) in [
+            (
+                "know-source",
+                "source.md",
+                "Source",
+                "Rust SQLite architecture",
+                70.0,
+            ),
+            (
+                "know-target",
+                "target.md",
+                "Target",
+                "Rust SQLite indexing",
+                60.0,
+            ),
+            (
+                "know-reject",
+                "reject.md",
+                "Reject",
+                "Rust SQLite review",
+                50.0,
+            ),
+        ] {
+            let mut entity = sample_entity(id, path, score, "knowledge");
+            entity.title = Some(title.to_string());
+            db.upsert_entity_with_relationships(&entity, body, &["Rust".to_string()], &[])
+                .unwrap();
+        }
+        drop(db);
+
+        let response = related_entities(
+            State(state.clone()),
+            Path("know-source".to_string()),
+            Query(RelatedQuery { limit: 10 }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let suggestions = response["suggestions"].as_array().unwrap();
+        let target_id = suggestions
+            .iter()
+            .find(|suggestion| suggestion["id"] == "know-target")
+            .unwrap()["suggestion_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let reject_id = suggestions
+            .iter()
+            .find(|suggestion| suggestion["id"] == "know-reject")
+            .unwrap()["suggestion_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let accepted = accept_related_suggestion(State(state.clone()), Path(target_id.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(accepted["status"], "accepted");
+        let after_accept = fs::read_to_string(&source_path).unwrap();
+        assert!(after_accept.contains("[[know-target]]"));
+        assert_eq!(
+            state.db.lock().await.entity_links("know-source").unwrap(),
+            vec!["know-target"]
+        );
+
+        let repeated = accept_related_suggestion(State(state.clone()), Path(target_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(repeated["status"], "accepted");
+        assert_eq!(fs::read_to_string(&source_path).unwrap(), after_accept);
+
+        let before_reject = fs::read_to_string(&source_path).unwrap();
+        let rejected = reject_related_suggestion(State(state.clone()), Path(reject_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(fs::read_to_string(&source_path).unwrap(), before_reject);
+
+        let stale_response = related_entities(
+            State(state.clone()),
+            Path("know-source".to_string()),
+            Query(RelatedQuery { limit: 10 }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let stale_id = stale_response["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|suggestion| suggestion["id"] == "know-reject")
+            .unwrap()["suggestion_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        fs::write(
+            &source_path,
+            format!("{}\nchanged", fs::read_to_string(&source_path).unwrap()),
+        )
+        .unwrap();
+        let error = accept_related_suggestion(State(state.clone()), Path(stale_id.clone()))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict { .. }));
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .await
+                .get_suggestion(&stale_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "expired"
+        );
     }
 
     #[test]
