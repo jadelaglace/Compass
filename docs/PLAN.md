@@ -13,7 +13,7 @@
 | 1 | 核心闭环 | 2-3 周 | ✅ 完成 | Obsidian 新建笔记→引擎算分写回 frontmatter→Dataview 排序可见 |
 | 2 | 浮现与可视化 | 2 周 | ✅ 完成 | `/feed` 浮现正确；Web 引力场节点大小=评分 |
 | 3 | Agent/Skill 对接 | 1-2 周 | ✅ 完成 | skill action→Compass API→vault；本地 E2E 覆盖 action + render + FileWatcher |
-| 4 | 智能增强 | 按需 | 待开发 | 自动标签/关联推荐/周报 |
+| 4 | 智能增强 | 按需 | 准备完成 | 可解释标签建议/关联推荐/周报 |
 | 5 | 打磨 | 按需 | 待开发 | Dataview 模板库 + Git 备份 + 跨端同步 |
 
 **总周期：5-8 周。**
@@ -78,11 +78,22 @@
 
 ---
 
-## 4. Phase 4 · 智能增强（可选）
+## 4. Phase 4 · 智能增强（准备完成，待实现）
 
-- 自动标签建议（LLM / 标题分词）
-- 关联推荐（FTS5 相似度 + 图谱距离）
-- 认知演化周报（评分变化 Top5 推送飞书）
+Phase 4 的实施入口是 [`docs/PHASE4_PREP.md`](PHASE4_PREP.md)。先冻结协议和责任边界，再进入运行时开发：
+
+| ID | 任务 | 依赖 | 状态 | 验收摘要 |
+|----|------|------|------|----------|
+| T4.0 | 协议、标签格式、事件与 schema migration | — | 待开发 | 固定 JSON fixture；迁移可重复 |
+| T4.1 | 事件与标签/链接可重建索引 | T4.0 | 待开发 | rebuild 后索引恢复 |
+| T4.2 | 带 content hash 的 metadata patch | T4.0 | 待开发 | stale 返回 409；只改目标字段 |
+| T4.3 | 标签候选 + accept/reject | T4.1,T4.2 | 待开发 | 候选只读；accept 幂等；reject 无写入 |
+| T4.4 | 关联推荐 | T4.1 | 待开发 | lexical/tag/graph 理由；排除既有链接 |
+| T4.5 | 认知周报聚合 | T4.1 | 待开发 | 固定时区可重复；覆盖空/缺失数据 |
+| T4.6 | skill action/render 与 E2E | T4.3-T4.5 | 待开发 | action → API → Vault/SQLite → render |
+| T4.7 | HTTP 暴露面安全门禁 | Issue #206 | 待开发 | 默认 localhost；非本机需显式配置 |
+
+约束：Agent/skill 调用已有 LLM，Compass 不内嵌 LLM；Feishu ws 不回迁；Obsidian 标签/链接不自动覆盖。具体字段、非目标和完成定义见 [`docs/PHASE4_PREP.md`](PHASE4_PREP.md)。
 
 ---
 
@@ -102,4 +113,4 @@ Phase 1、Phase 2、Phase 3 已完成。Phase 3 的本地验收从 `skills/compa
 
 证据：`skills/compass/test_e2e.py`（14 个 E2E）和 `skills/compass/test_compass.py`（18 个 renderer 单测）。
 
-下一步为按需进入 Phase 4 智能增强；当前不启动自动标签、关联推荐或周报等非核心功能。
+Phase 4 已完成准备但尚未启动运行时开发；下一步从 T4.0 开始，并按 [`docs/PHASE4_PREP.md`](PHASE4_PREP.md) 逐项通过 issue/PR 验收。

@@ -178,6 +178,12 @@ Compass/
 
 验收路径：`skill action → Rust HTTP API → vault/frontmatter → FileWatcher → skill render`。
 
+### Phase 4 · 智能增强（准备完成，待实现）
+
+实施入口：[`docs/PHASE4_PREP.md`](docs/PHASE4_PREP.md)。
+
+Phase 4 只做可解释建议和结构化周报：LLM 由已有 Agent/skill 调用，Compass 不自动覆盖标签/链接、不实现 Feishu ws，所有 Vault 写回都必须经过显式确认和 content hash 校验。
+
 ## 测试
 
 ```bash
