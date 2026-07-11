@@ -1,7 +1,7 @@
 # Compass 开发计划 (PLAN)
 
 > 版本：v1.0 ｜ 日期：2026-07-05
-> 依据：`docs/PRD_v3.0.md`
+> 文档链：[`PRD_v3.0.md`](PRD_v3.0.md) → [`ARCHITECTURE.md`](ARCHITECTURE.md) → [`TEST_CASES.md`](TEST_CASES.md) → 本计划 → [`GITHUB_WORKFLOW.md`](GITHUB_WORKFLOW.md)
 > 原则：渐进式复杂，每个 Phase 有可验收闭环。
 
 ---
@@ -11,10 +11,10 @@
 | Phase | 名称 | 周期 | 状态 | 验收闭环 |
 |-------|------|------|------|----------|
 | 1 | 核心闭环 | 2-3 周 | ✅ 完成 | Obsidian 新建笔记→引擎算分写回 frontmatter→Dataview 排序可见 |
-| 2 | 浮现与可视化 | 2 周 | ✅ 完成 | `/feed` 浮现正确；Web 引力场节点大小=评分 |
+| 2 | 浮现与可视化 | 2 周 | ✅ 完成（Web 已冻结） | `/feed` 浮现正确；保留既有 Web 引力场兼容 |
 | 3 | Agent/Skill 对接 | 1-2 周 | ✅ 完成 | skill action→Compass API→vault；本地 E2E 覆盖 action + render + FileWatcher |
 | 4 | 智能增强 | 按需 | ✅ 完成 | 可解释建议/周报 + 可配置 Skill 连接 + 实时有效分 |
-| 5 | 打磨 | 按需 | 待开发 | Dataview 模板库 + Git 备份 + 跨端同步 |
+| 5 | 架构收敛与打磨 | 按需 | 待开发 | 按 `ARCHITECTURE.md` 收敛边界，再完成模板、备份与同步 |
 
 **总周期：5-8 周。**
 
@@ -31,7 +31,7 @@
 |----|------|------|------|------|------|
 | T1.1 | 项目骨架 | Cargo workspace + crate 依赖 + `compass.toml` 配置加载 | — | 4h | `cargo build` 通过；`/health` 返回 ok |
 | T1.2 | frontmatter 读写模块 | 解析 YAML → 改 `score:` 块 → 原子写回 + 文件锁 | T1.1 | 8h | 读 .md frontmatter；改 score 写回不破坏正文；Obsidian 自动重载 |
-| T1.3 | 评分引擎 | composite 公式 + 衰减（只衰 interest）+ 触发器表 | T1.1 | 8h | 单元测试：权重 0.4/0.35/0.25；衰减 0.98^天 50% 地板；触发器 boost |
+| T1.3 | 评分引擎 | composite 公式 + 触发器表；历史持久化衰减已由 T4.9 取代 | T1.1 | 8h | 单元测试：权重 0.4/0.35/0.25；触发器 boost；时效仅在读取时计算 |
 | T1.4 | SQLite 索引层 | `entities/score_history/timeline/entities_fts` + 可重建 | T1.1 | 6h | 从 vault 全量重建索引；FTS5 可查 |
 | T1.5 | FileWatcher | `notify` 监听 vault → 解析 → 索引 + 重算评分 → 写回 frontmatter | T1.2,T1.3,T1.4 | 10h | Obsidian 新建/改笔记 → 30s 内索引+算分+写回 |
 | T1.6 | 基础 API | `GET /feed` `/entities/top` `/entities/{id}` `/search` `PATCH /score` `/access` `POST /entities` | T1.4 | 8h | curl 各端点返回正确 JSON；score/access 写回 frontmatter |
@@ -43,7 +43,7 @@
 ### Phase 1 关键不变量（验收必须满足）
 
 1. **frontmatter 是权威**：`score.composite` 由引擎计算并写回；SQLite 仅缓存，删库可从 vault 重建。
-2. **衰减只衰 interest**：`new_interest = max(interest*0.5, interest*0.98^days)`；strategy/consensus 不衰减。
+2. **历史衰减已废止**：T1.3 的持久化 interest 衰减已由 T4.9 替代；三维基础分不因时间改写，知识时效只在读取时形成有效分。
 3. **权重默认 0.40/0.35/0.25**：不得出现 0.4/0.4/0.2（修正 v2.x bug）。
 4. **写回不破坏正文**：只改 `score:` 块，Mermaid/正文/其他 frontmatter 字段不变。
 5. **单二进制**：无 Python、无 subprocess；`cargo build --release` 产出一个可执行文件。
@@ -54,11 +54,11 @@
 
 | ID | 任务 | 依赖 | 工时 |
 |----|------|------|------|
-| T2.1 | 衰减调度（tokio 定时，每日 02:00） | P1 | 4h |
+| T2.1 | 历史衰减调度（已由 T4.9 废止） | P1 | 4h |
 | T2.2 | Feed 三模式（explore/consolidate/strategic） | P1 | 6h |
 | T2.3 | `/graph` 引力场数据端点（节点+边+评分） | P1 | 6h |
-| T2.4 | Web 极薄页（HTMX + D3，引力场 + Feed） | T2.3 | 12h |
-| T2.5 | 验收：30 天衰减曲线 + 节点大小=评分 | T2.4 | 4h |
+| T2.4 | Web 静态页（引力场 + Feed，已完成并冻结） | T2.3 | 12h |
+| T2.5 | 验收：固定时间下实时有效分 + 节点大小=有效分 | T2.4 | 4h |
 
 **Phase 2 合计：~32h（2 周）。**
 
@@ -99,11 +99,23 @@ T4.9 取代历史的持久化 interest 衰减：`score` 中的三维基础分只
 
 ---
 
-## 5. Phase 5 · 打磨
+## 5. Phase 5 · 架构收敛与打磨
 
-- Dataview 查询模板库（`docs/dataview-queries.md`）
-- Git 自动提交备份（每日 diff）
-- 跨端同步（Syncthing/WebDAV）
+| ID | 任务 | 依赖 | 验收 |
+|----|------|------|------|
+| P5.1 | 架构基线与行为刻画 | `ARCHITECTURE.md`、`TEST_CASES.md` | 当前 HTTP/Skill/Vault 契约有测试覆盖；不改变公开契约 |
+| P5.2 | Domain 与 HTTP DTO 分界 | P5.1 | Application/Domain 不依赖 Axum 或 SQL 行模型 |
+| P5.3 | Vault 适配层与索引服务 | P5.2 | `db.rs` 不再扫描目录或解析 Markdown；rebuild 与 watcher 共用索引路径 |
+| P5.4 | SQLite 仓储与锁范围收敛 | P5.3 | `EntityRow` 为基础设施私有；数据库锁不覆盖文件 I/O、排序或 `.await` |
+| P5.5 | 查询、实体、建议应用服务 | P5.4 | HTTP handler 仅做校验、调用与序列化 |
+| P5.6 | 架构收尾与回归验收 | P5.5 | Rust、HTTP/Skill E2E、rebuild 幂等回归通过；文档与实际结构一致 |
+| P5.7 | Dataview 查询模板库 | P5.6 | `docs/dataview-queries.md` 覆盖既定查询场景 |
+| P5.8 | Git 自动提交备份 | P5.7 | 每日 diff 可审计且不影响 Vault 权威性 |
+| P5.9 | 跨端同步（Syncthing/WebDAV） | P5.8 | 同步冲突与重建路径经过验证 |
+
+> P5.1-P5.6 以 [`ARCHITECTURE.md`](ARCHITECTURE.md) 和 [`TEST_CASES.md`](TEST_CASES.md) 为设计、测试与验收基线；未经 PRD 更新不得改变公开 HTTP、Skill 或 Vault 契约。
+
+> **Web UI 冻结策略：**保留现有 `web/` 静态页面、`/graph` API 和 Rust 静态服务，以维持已有访问方式；不删除、不新增功能、不进行 SPA 化或视觉重构。后续若重新投入，目标是将其剥离为可选的独立包/服务，而不是继续扩展 Compass 核心。
 
 ---
 

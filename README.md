@@ -12,6 +12,8 @@
 
 ## 架构
 
+模块边界、数据流和 Phase 5 重构目标见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
 ```
 用户 -> 飞书消息 -> 飞书 ws(已有) -> Agent(已有) -> compass skill(已有 CLI)
                                                         │ HTTP JSON
@@ -152,7 +154,10 @@ Compass/
 ├── skills/compass/            # compass skill CLI（已有，Python）
 ├── docs/                      # 文档
 │   ├── PRD_v3.0.md            # 实施规格
+│   ├── ARCHITECTURE.md         # 架构设计基线
+│   ├── TEST_CASES.md           # 验收测试用例
 │   ├── PLAN.md                # 开发计划
+│   ├── GITHUB_WORKFLOW.md      # 开发、测试与合并流程
 │   ├── dataview-queries.md    # Dataview 查询模板
 │   └── REVIEW_*.md            # 各任务 review
 └── archive/                   # v2.x 归档
@@ -173,7 +178,7 @@ Compass/
 
 ### Phase 2 · 浮现与可视化 ✅
 
-实时有效分 + Feed 三模式 + 引力场 Web（HTMX+D3）已完成。
+实时有效分 + Feed 三模式已完成。现有引力场 Web 静态页保留冻结以兼容既有使用，不再新增功能；Obsidian 与 Agent/Skill 是后续活跃交互界面，Web 将来计划剥离为可选组件。
 
 ### Phase 3 · Agent/Skill 对接 ✅
 
@@ -196,7 +201,7 @@ cargo test
 
 141 个 Rust 测试覆盖：评分引擎 / frontmatter 读写 / SQLite 索引 / 中英文搜索 / FileWatcher / API / Phase 4 契约 / 端到端闭环。
 
-skill 侧另有 21 个 renderer 单测和 17 个 HTTP E2E（含 Phase 4 边界与混合负载回归）：
+skill 侧另有 23 个 renderer 单测和 17 个 HTTP E2E（含 Phase 4 边界与混合负载回归）：
 
 ```bash
 cd skills/compass
