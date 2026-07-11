@@ -1007,6 +1007,9 @@ fn walk_md_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             continue;
         }
         if path.is_dir() {
+            if name == "Templates" {
+                continue;
+            }
             walk_md_inner(&path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             out.push(path);
@@ -1025,6 +1028,9 @@ struct ParsedEntity {
 
 fn parse_entity(vault: &Path, path: &Path) -> Result<Option<ParsedEntity>> {
     let note = frontmatter::read_note(path)?;
+    if frontmatter::has_unrendered_templater_marker(&note.frontmatter) {
+        return Ok(None);
+    }
     let fm: serde_yaml::Value =
         serde_yaml::from_str(&note.frontmatter).context("解析 frontmatter 失败")?;
     let m = fm
@@ -1655,6 +1661,73 @@ mod tests {
         assert!(db.get_entity("hidden-1").unwrap().is_none());
         assert!(db.fts_search("hidden", 10).unwrap().is_empty());
         assert!(db.fts_search("visible", 10).unwrap().len() == 1);
+    }
+
+    #[test]
+    fn test_rebuild_skips_templates_at_any_depth() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(vault.join("Templates")).unwrap();
+        fs::create_dir_all(vault.join("Knowledge").join("Templates")).unwrap();
+        fs::write(
+            vault.join("Templates").join("knowledge.md"),
+            md_with_id("template-root", "Root template", "template root body"),
+        )
+        .unwrap();
+        fs::write(
+            vault.join("Knowledge").join("Templates").join("case.md"),
+            md_with_id("template-nested", "Nested template", "template nested body"),
+        )
+        .unwrap();
+        fs::create_dir_all(vault.join("Knowledge").join("Math")).unwrap();
+        fs::write(
+            vault.join("Knowledge").join("Math").join("know-1.md"),
+            md_with_id("know-1", "Indexed", "normal recursive body"),
+        )
+        .unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let stats = db.rebuild_from_vault(&vault).unwrap();
+        assert_eq!(stats.indexed, 1);
+        assert!(db.get_entity("template-root").unwrap().is_none());
+        assert!(db.get_entity("template-nested").unwrap().is_none());
+        assert!(db.fts_search("template", 10).unwrap().is_empty());
+        assert!(db.get_entity("know-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_rebuild_skips_unrendered_templater_frontmatter_and_cleans_dirty_index() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(
+            vault.join("unrendered.md"),
+            md_with_id(
+                "case-<% tp.date.now(\"YYMMDD\") %>",
+                "<% tp.file.title %>",
+                "template source body",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            vault.join("know-1.md"),
+            md_with_id("know-1", "Indexed", "normal body"),
+        )
+        .unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_entity(&sample_row("dirty-template"), "stale template entry")
+            .unwrap();
+        let stats = db.rebuild_from_vault(&vault).unwrap();
+        assert_eq!(stats.indexed, 1);
+        assert_eq!(stats.skipped, 1);
+        assert!(db.get_entity("dirty-template").unwrap().is_none());
+        assert!(db
+            .get_entity("case-<% tp.date.now(\"YYMMDD\") %>")
+            .unwrap()
+            .is_none());
+        assert!(db.fts_search("template", 10).unwrap().is_empty());
+        assert!(db.get_entity("know-1").unwrap().is_some());
     }
 
     #[test]

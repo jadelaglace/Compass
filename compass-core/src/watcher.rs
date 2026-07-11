@@ -34,6 +34,7 @@ const DEFAULT_CONSENSUS: f64 = 5.0;
 
 /// 隐藏目录列表（跳过这些目录下的事件）
 const HIDDEN_DIRS: &[&str] = &[".obsidian", ".compass", ".git"];
+const TEMPLATE_DIR: &str = "Templates";
 
 /// FileWatcher 配置
 pub struct FileWatcher {
@@ -161,8 +162,24 @@ pub(crate) async fn process_single_file(
         return Ok(());
     }
 
+    if is_template_path(vault, path) {
+        let relative = rel_path(vault, path);
+        let db = db.lock().await;
+        db.delete_entities_under_path(&relative)?;
+        return Ok(());
+    }
+
     // 读取 frontmatter
     let note = frontmatter::read_note(path)?;
+
+    if frontmatter::has_unrendered_templater_marker(&note.frontmatter) {
+        let relative = rel_path(vault, path);
+        let db = db.lock().await;
+        if let Some(existing_id) = db.entity_id_by_file_path(&relative)? {
+            db.delete_entity(&existing_id)?;
+        }
+        return Ok(());
+    }
 
     // 解析 id（无 id 跳过）
     let id = match extract_id_from_frontmatter(&note.frontmatter) {
@@ -462,6 +479,14 @@ fn is_hidden_path(paths: &[PathBuf]) -> bool {
     false
 }
 
+fn is_template_path(vault: &Path, path: &Path) -> bool {
+    path.strip_prefix(vault)
+        .ok()
+        .into_iter()
+        .flat_map(|relative| relative.components())
+        .any(|component| component.as_os_str() == TEMPLATE_DIR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +560,84 @@ mod tests {
         let entity = db.lock().await.get_entity("know-000001").unwrap().unwrap();
         assert_eq!(entity.title.as_deref(), Some("Test"));
         assert!((entity.composite.unwrap() - 85.5).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_process_single_file_removes_template_and_unrendered_entries() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        let templates = vault.join("Knowledge").join("Templates");
+        fs::create_dir_all(&templates).unwrap();
+        let template_path = templates.join("case.md");
+        fs::write(
+            &template_path,
+            "---\nid: case-template\ntitle: Template\n---\ntemplate body\n",
+        )
+        .unwrap();
+        let unrendered_path = vault.join("unrendered.md");
+        fs::write(
+            &unrendered_path,
+            "---\nid: case-<% tp.date.now(\"YYMMDD\") %>\ntitle: Template\n---\ntemplate body\n",
+        )
+        .unwrap();
+
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let weights = Weights::default();
+        {
+            let db_guard = db.lock().await;
+            db_guard
+                .upsert_entity(
+                    &EntityRow {
+                        id: "case-template".to_string(),
+                        file_path: "Knowledge/Templates/case.md".to_string(),
+                        title: Some("Template".to_string()),
+                        layer: None,
+                        status: None,
+                        interest: None,
+                        strategy: None,
+                        consensus: None,
+                        composite: None,
+                        access_count: 0,
+                        last_boosted_at: None,
+                        content_hash: None,
+                        updated_at: None,
+                    },
+                    "template body",
+                )
+                .unwrap();
+            db_guard
+                .upsert_entity(
+                    &EntityRow {
+                        id: "case-unrendered".to_string(),
+                        file_path: "unrendered.md".to_string(),
+                        title: Some("Template".to_string()),
+                        layer: None,
+                        status: None,
+                        interest: None,
+                        strategy: None,
+                        consensus: None,
+                        composite: None,
+                        access_count: 0,
+                        last_boosted_at: None,
+                        content_hash: None,
+                        updated_at: None,
+                    },
+                    "template body",
+                )
+                .unwrap();
+        }
+
+        process_single_file(&vault, &db, &weights, &template_path)
+            .await
+            .unwrap();
+        process_single_file(&vault, &db, &weights, &unrendered_path)
+            .await
+            .unwrap();
+
+        let db_guard = db.lock().await;
+        assert!(db_guard.get_entity("case-template").unwrap().is_none());
+        assert!(db_guard.get_entity("case-unrendered").unwrap().is_none());
+        assert!(db_guard.fts_search("template", 10).unwrap().is_empty());
     }
 
     #[tokio::test]
