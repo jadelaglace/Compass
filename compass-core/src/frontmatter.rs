@@ -25,6 +25,7 @@ pub struct Note {
 
 /// Metadata changes that Phase 4 accept operations are allowed to apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MetadataPatch {
     AddTag(String),
     AddLink(String),
