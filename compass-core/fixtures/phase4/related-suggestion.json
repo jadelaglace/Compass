@@ -1,0 +1,10 @@
+{
+  "suggestion_id": "sug-1111111111111111111111111111111111111111111111111111111111111111",
+  "id": "know-000002",
+  "title": "Related Note",
+  "composite": 72.5,
+  "score": 0.62,
+  "reasons": ["shared term: decision", "shared tag: rust"],
+  "content_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "status": "pending"
+}

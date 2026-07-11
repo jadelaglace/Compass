@@ -57,6 +57,37 @@ pub struct TagSuggestion {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelatedSuggestion {
+    pub suggestion_id: String,
+    pub id: String,
+    pub title: Option<String>,
+    pub composite: Option<f64>,
+    pub score: f64,
+    pub reasons: Vec<String>,
+    pub content_hash: String,
+    pub status: SuggestionStatus,
+}
+
+impl TagSuggestion {
+    pub fn validate(&self) -> Result<()> {
+        validate_suggestion_id(&self.suggestion_id)?;
+        validate_content_hash(&self.content_hash)?;
+        normalize_tag(&self.tag)?;
+        if !(0.0..=1.0).contains(&self.confidence) {
+            return Err(anyhow!("confidence must be between 0 and 1"));
+        }
+        Ok(())
+    }
+}
+
+impl RelatedSuggestion {
+    pub fn validate(&self) -> Result<()> {
+        validate_suggestion_id(&self.suggestion_id)?;
+        validate_content_hash(&self.content_hash)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
@@ -103,16 +134,21 @@ pub fn stable_suggestion_id(
     algorithm_version: &str,
     source: &str,
 ) -> String {
-    let key = [
-        kind.as_str(),
-        entity_id,
-        candidate,
-        content_hash,
-        algorithm_version,
-        source,
-    ]
-    .join("\n");
-    format!("sug-{}", hex_digest(key.as_bytes()))
+    let fields = [
+        kind.as_str().to_string(),
+        entity_id.to_string(),
+        canonical_candidate(kind, candidate),
+        content_hash.to_string(),
+        algorithm_version.to_string(),
+        source.to_string(),
+    ];
+    let mut key = Vec::new();
+    for field in fields {
+        key.extend_from_slice(field.len().to_string().as_bytes());
+        key.push(b':');
+        key.extend_from_slice(field.as_bytes());
+    }
+    format!("sug-{}", hex_digest(&key))
 }
 
 pub fn normalize_tag(tag: &str) -> Result<String> {
@@ -123,7 +159,44 @@ pub fn normalize_tag(tag: &str) -> Result<String> {
     if tag.contains('#') {
         return Err(anyhow!("tag must not contain #"));
     }
+    if tag
+        .chars()
+        .any(|character| character == '\n' || character == '\r')
+    {
+        return Err(anyhow!("tag must be a single line"));
+    }
     Ok(tag.to_string())
+}
+
+pub fn candidate_key(kind: SuggestionKind, candidate: &str) -> String {
+    canonical_candidate(kind, candidate)
+}
+
+fn canonical_candidate(kind: SuggestionKind, candidate: &str) -> String {
+    match kind {
+        SuggestionKind::Tag => candidate.trim().to_lowercase(),
+        SuggestionKind::Related => candidate.to_string(),
+    }
+}
+
+pub fn validate_suggestion_id(value: &str) -> Result<()> {
+    let digest = value
+        .strip_prefix("sug-")
+        .ok_or_else(|| anyhow!("suggestion_id must start with sug-"))?;
+    validate_hex_digest(digest, "suggestion_id")
+}
+
+pub fn validate_content_hash(value: &str) -> Result<()> {
+    validate_hex_digest(value, "content_hash")
+}
+
+fn validate_hex_digest(value: &str, field: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "{field} must contain 64 lowercase/uppercase hex characters"
+        ));
+    }
+    Ok(())
 }
 
 /// Hash note metadata and body while excluding the mutable top-level `score` block.
@@ -147,18 +220,28 @@ pub fn note_content_hash(note: &str) -> Result<String> {
 fn without_top_level_score(frontmatter: &str) -> String {
     let mut output = Vec::new();
     let mut skipping_score = false;
+    let mut pending_blank_lines = Vec::new();
     for line in frontmatter.split('\n') {
         if !skipping_score && line.starts_with("score:") {
             skipping_score = true;
             continue;
         }
         if skipping_score {
-            if line.is_empty() || line.starts_with(char::is_whitespace) {
+            if line.is_empty() {
+                pending_blank_lines.push(line);
+                continue;
+            }
+            if line.chars().next().is_some_and(char::is_whitespace) {
+                pending_blank_lines.clear();
                 continue;
             }
             skipping_score = false;
+            output.append(&mut pending_blank_lines);
         }
         output.push(line);
+    }
+    if skipping_score {
+        output.append(&mut pending_blank_lines);
     }
     output.join("\n")
 }
@@ -205,6 +288,18 @@ mod tests {
                 "rust_lexical",
             )
         );
+        assert_eq!(
+            first,
+            stable_suggestion_id(
+                SuggestionKind::Tag,
+                "know-1",
+                "Decision",
+                "hash",
+                TAG_ALGORITHM_VERSION,
+                "rust_lexical",
+            )
+        );
+        assert_eq!(candidate_key(SuggestionKind::Tag, " Decision "), "decision");
     }
 
     #[test]
@@ -232,6 +327,13 @@ mod tests {
             note_content_hash(second).unwrap()
         );
 
+        let with_gap = "---\nid: know-1\ntags:\n  - rust\nscore:\n  interest: 99\n\nstatus: active\n---\nbody\n";
+        let with_gap_changed_score = with_gap.replace("interest: 99", "interest: 1");
+        assert_eq!(
+            note_content_hash(with_gap).unwrap(),
+            note_content_hash(&with_gap_changed_score).unwrap()
+        );
+
         let changed = second.replace("- rust", "- rust\n  - sqlite");
         assert_ne!(
             note_content_hash(second).unwrap(),
@@ -254,6 +356,11 @@ mod tests {
         let suggestion: TagSuggestion =
             serde_json::from_str(include_str!("../fixtures/phase4/tag-suggestion.json")).unwrap();
         assert_eq!(suggestion.status, SuggestionStatus::Pending);
+        suggestion.validate().unwrap();
+        let related: RelatedSuggestion =
+            serde_json::from_str(include_str!("../fixtures/phase4/related-suggestion.json"))
+                .unwrap();
+        related.validate().unwrap();
         let error: ApiError =
             serde_json::from_str(include_str!("../fixtures/phase4/error.json")).unwrap();
         assert_eq!(error.code, "suggestion_expired");

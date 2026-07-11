@@ -353,6 +353,11 @@ impl Db {
 
 fn apply_migration(tx: &Transaction<'_>, version: i64) -> Result<()> {
     match version {
+        #[cfg(test)]
+        99 => {
+            tx.execute_batch("CREATE TABLE migration_probe (value TEXT);")?;
+            return Err(anyhow::anyhow!("injected migration failure"));
+        }
         1 => tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS entities (
                id TEXT PRIMARY KEY,
@@ -396,6 +401,7 @@ fn apply_migration(tx: &Transaction<'_>, version: i64) -> Result<()> {
                kind TEXT NOT NULL CHECK (kind IN ('tag', 'related')),
                entity_id TEXT NOT NULL,
                candidate TEXT NOT NULL,
+               candidate_key TEXT NOT NULL,
                confidence REAL,
                reason TEXT NOT NULL,
                source TEXT NOT NULL,
@@ -404,7 +410,7 @@ fn apply_migration(tx: &Transaction<'_>, version: i64) -> Result<()> {
                status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
                created_at TEXT NOT NULL,
                updated_at TEXT NOT NULL,
-               UNIQUE(kind, entity_id, candidate, content_hash, algorithm_version, source)
+               UNIQUE(kind, entity_id, candidate_key, content_hash, algorithm_version, source)
              );
              CREATE INDEX IF NOT EXISTS idx_suggestions_entity_status
                ON suggestions(entity_id, status);",
@@ -616,23 +622,71 @@ mod tests {
         let path = dir.path().join("index.db");
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("CREATE TABLE legacy_marker (value TEXT);")
-                .unwrap();
+            conn.execute_batch(
+                "CREATE TABLE entities (
+                   id TEXT PRIMARY KEY, file_path TEXT UNIQUE NOT NULL, title TEXT,
+                   layer TEXT, status TEXT, interest REAL, strategy REAL,
+                   consensus REAL, composite REAL, access_count INTEGER NOT NULL DEFAULT 0,
+                   last_boosted_at TEXT, content_hash TEXT, updated_at TEXT
+                 );
+                 CREATE TABLE score_history (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id TEXT NOT NULL,
+                   dimension TEXT, old REAL, new REAL, reason TEXT, trigger TEXT,
+                   created_at TEXT NOT NULL
+                 );
+                 CREATE TABLE timeline (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id TEXT NOT NULL,
+                   event_type TEXT NOT NULL, intensity REAL, source TEXT,
+                   created_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_score_history_entity ON score_history(entity_id);
+                 CREATE INDEX idx_score_history_trigger ON score_history(entity_id, trigger);
+                 CREATE INDEX idx_timeline_entity ON timeline(entity_id);
+                 CREATE VIRTUAL TABLE entities_fts USING fts5(title, content);
+                 INSERT INTO entities (id, file_path, title, access_count)
+                   VALUES ('know-legacy', 'legacy.md', 'Legacy', 0);",
+            )
+            .unwrap();
         }
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let before = fs::read(&path).unwrap();
 
         let db = Db::open(&path).unwrap();
         let backup = path.with_extension("db.pre-migration.bak");
         assert!(backup.exists());
+        assert_eq!(fs::read(&backup).unwrap(), before);
         assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
-        let marker: i64 = db
+        let legacy_entity: String = db
             .conn
             .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = 'legacy_marker'",
+                "SELECT id FROM entities WHERE id = 'know-legacy'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(marker, 1);
+        assert_eq!(legacy_entity, "know-legacy");
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_schema_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        let db = Db { conn };
+        let tx = db.conn.unchecked_transaction().unwrap();
+
+        assert!(apply_migration(&tx, 99).is_err());
+        drop(tx);
+        let probe_table_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'migration_probe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(probe_table_count, 0);
     }
 
     #[test]
