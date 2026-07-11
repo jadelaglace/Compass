@@ -17,6 +17,7 @@ Actions:
 
 Environment:
     COMPASS_API_URL  API base URL (default: http://localhost:8080)
+    COMPASS_API_TOKEN  Optional Bearer token for authenticated Compass servers
 """
 
 import sys
@@ -42,12 +43,19 @@ def api_url(path: str) -> str:
     return f"{get_api_url().rstrip('/')}/{path.lstrip('/')}"
 
 
+def add_auth_header(req: urllib.request.Request) -> None:
+    token = os.environ.get("COMPASS_API_TOKEN", "").strip()
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+
+
 def http_get(path: str, params: dict | None = None) -> dict:
     url = api_url(path)
     if params:
         url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url)
     req.add_header("Accept", "application/json")
+    add_auth_header(req)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
@@ -70,6 +78,7 @@ def http_patch(path: str, data: dict) -> dict:
     req = urllib.request.Request(url, data=body_bytes, method="PATCH")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
+    add_auth_header(req)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
@@ -92,6 +101,7 @@ def http_post(path: str, data: dict) -> dict:
     req = urllib.request.Request(url, data=body_bytes)
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
+    add_auth_header(req)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())

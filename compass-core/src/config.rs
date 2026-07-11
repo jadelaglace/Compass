@@ -21,21 +21,7 @@ pub struct Config {
     #[serde(default)]
     pub db_path: Option<PathBuf>,
     #[serde(default)]
-    pub decay: DecayConfig,
-    #[serde(default)]
     pub weights: Weights,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DecayConfig {
-    #[serde(default = "default_rate")]
-    pub daily_rate: f64,
-    #[serde(default = "default_floor")]
-    pub floor: f64,
-    #[serde(default = "default_boost_protection")]
-    pub boost_protection_days: i64,
-    #[serde(default = "default_direction_factor")]
-    pub direction_layer_factor: f64,
 }
 
 fn default_port() -> u16 {
@@ -46,29 +32,6 @@ fn default_bind() -> String {
 }
 fn default_request_body_limit_bytes() -> usize {
     1024 * 1024
-}
-fn default_rate() -> f64 {
-    0.98
-}
-fn default_floor() -> f64 {
-    0.5
-}
-fn default_boost_protection() -> i64 {
-    3
-}
-fn default_direction_factor() -> f64 {
-    0.5
-}
-
-impl Default for DecayConfig {
-    fn default() -> Self {
-        Self {
-            daily_rate: default_rate(),
-            floor: default_floor(),
-            boost_protection_days: default_boost_protection(),
-            direction_layer_factor: default_direction_factor(),
-        }
-    }
 }
 
 impl Config {
@@ -187,7 +150,6 @@ mod tests {
             auth_token: None,
             request_body_limit_bytes: default_request_body_limit_bytes(),
             db_path: None,
-            decay: DecayConfig::default(),
             weights: Weights::default(),
         }
     }

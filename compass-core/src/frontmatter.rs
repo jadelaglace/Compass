@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use serde_yaml::Value;
 
-use crate::models::Score;
+use crate::models::{Freshness, Score};
 
 /// 一个笔记：frontmatter 原始文本 + 正文（closing `---` 之后）。
 pub struct Note {
@@ -259,6 +259,29 @@ pub fn get_score(frontmatter: &str) -> Result<Option<Score>> {
         )),
         None => Ok(None),
     }
+}
+
+pub fn get_freshness(frontmatter: &str) -> Result<Freshness> {
+    let fm: Value = serde_yaml::from_str(frontmatter).context("解析 frontmatter 失败")?;
+    let Some(mapping) = fm.as_mapping() else {
+        return Err(anyhow!("frontmatter 不是 mapping"));
+    };
+    match mapping.get(Value::String("freshness".into())) {
+        Some(value) => serde_yaml::from_value(value.clone()).context("解析 freshness 失败"),
+        None => Ok(Freshness::default()),
+    }
+}
+
+pub fn content_updated_at(frontmatter: &str) -> Result<Option<String>> {
+    let fm: Value = serde_yaml::from_str(frontmatter).context("解析 frontmatter 失败")?;
+    let Some(mapping) = fm.as_mapping() else {
+        return Err(anyhow!("frontmatter 不是 mapping"));
+    };
+    Ok(mapping
+        .get(Value::String("content_updated_at".into()))
+        .or_else(|| mapping.get(Value::String("updated_at".into())))
+        .and_then(Value::as_str)
+        .map(str::to_string))
 }
 
 /// 把 Score 序列化为 score 块文本（`score:\n  field: ...\n...`）。

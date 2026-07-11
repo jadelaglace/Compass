@@ -11,9 +11,3 @@ request_body_limit_bytes = 1048576
 interest = 0.40
 strategy = 0.35
 consensus = 0.25
-
-[decay]              # 衰减参数（只衰 interest）
-daily_rate = 0.98            # 每日衰减率
-floor = 0.5                  # 地板（防完全遗忘）
-boost_protection_days = 3    # boost 保护期
-direction_layer_factor = 0.5 # direction 层衰减减半

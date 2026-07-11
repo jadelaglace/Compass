@@ -30,13 +30,17 @@ COMPASS_CORE = os.path.join(REPO_ROOT, "compass-core")
 DEFAULT_BINARY = os.path.join(COMPASS_CORE, "target", "release", "compass.exe")
 if not os.path.exists(DEFAULT_BINARY):
     DEFAULT_BINARY = os.path.join(COMPASS_CORE, "target", "debug", "compass.exe")
+TEST_API_TOKEN = "compass-e2e-token"
 
 
-def wait_for_server(url, timeout=30):
+def wait_for_server(url, timeout=30, token=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1) as resp:
+            request = urllib.request.Request(url)
+            if token:
+                request.add_header("Authorization", f"Bearer {token}")
+            with urllib.request.urlopen(request, timeout=1) as resp:
                 if resp.status == 200:
                     return True
         except Exception:
@@ -79,6 +83,9 @@ def http_json(base_url, path, method="GET", payload=None, timeout=5):
         f"{base_url}{path}", data=data, method=method
     )
     request.add_header("Accept", "application/json")
+    token = os.environ.get("COMPASS_API_TOKEN", "").strip()
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
     if data is not None:
         request.add_header("Content-Type", "application/json")
     try:
@@ -154,6 +161,7 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
             f.write(
                 f'vault_path = "{vault_fwd}"\n'
                 "port = 18080\n"
+                f'auth_token = "{TEST_API_TOKEN}"\n'
                 "\n[weights]\n"
                 "interest = 0.40\n"
                 "strategy = 0.35\n"
@@ -168,6 +176,9 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
         cls.env = os.environ.copy()
         cls.env["COMPASS_CONFIG"] = cfg_path
         cls.env["COMPASS_API_URL"] = "http://localhost:18080"
+        cls.env["COMPASS_API_TOKEN"] = TEST_API_TOKEN
+        cls.previous_test_token = os.environ.get("COMPASS_API_TOKEN")
+        os.environ["COMPASS_API_TOKEN"] = TEST_API_TOKEN
 
         # 启动服务器
         if os.path.exists(DEFAULT_BINARY):
@@ -187,7 +198,7 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
             encoding="utf-8",
         )
 
-        if not wait_for_server("http://localhost:18080/health", timeout=60):
+        if not wait_for_server("http://localhost:18080/health", timeout=60, token=TEST_API_TOKEN):
             cls._kill_server()
             raise RuntimeError("compass server failed to start")
 
@@ -207,9 +218,11 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
             deadline = time.time() + 5
             while time.time() < deadline:
                 try:
-                    with urllib.request.urlopen(
-                        f"http://localhost:18080/entities/{entity_id}", timeout=1
-                    ):
+                    request = urllib.request.Request(
+                        f"http://localhost:18080/entities/{entity_id}"
+                    )
+                    request.add_header("Authorization", f"Bearer {TEST_API_TOKEN}")
+                    with urllib.request.urlopen(request, timeout=1):
                         pass
                 except urllib.error.HTTPError as exc:
                     is_absent = exc.code == 404
@@ -223,6 +236,10 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls._kill_server()
+        if cls.previous_test_token is None:
+            os.environ.pop("COMPASS_API_TOKEN", None)
+        else:
+            os.environ["COMPASS_API_TOKEN"] = cls.previous_test_token
         if cls.tmpdir and os.path.exists(cls.tmpdir):
             shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
