@@ -155,6 +155,33 @@ pub struct WeeklyReportFixture {
     pub suggestion_stats: SuggestionStats,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WeeklyReport {
+    pub from: String,
+    pub to: String,
+    pub tz: String,
+    pub generated_at: String,
+    pub data_quality: DataQuality,
+    pub score_changes: Vec<ScoreChangeFixture>,
+    pub score_increases: Vec<ScoreChangeFixture>,
+    pub score_decreases: Vec<ScoreChangeFixture>,
+    pub access_count: u64,
+    pub review_count: u64,
+    pub access_stats: AccessStats,
+    pub new_entities: Vec<String>,
+    pub suggestion_stats: SuggestionStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccessStats {
+    pub total: u64,
+    pub glance: u64,
+    pub read: u64,
+    pub study: u64,
+    pub apply: u64,
+    pub review: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataQuality {
     pub history_unavailable: bool,

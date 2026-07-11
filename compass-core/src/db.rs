@@ -88,6 +88,13 @@ pub struct SuggestionRow {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SuggestionStatsRow {
+    pub accepted: u64,
+    pub rejected: u64,
+    pub expired: u64,
+}
+
 /// 全量重建统计。
 #[derive(Debug, Default, Clone)]
 pub struct RebuildStats {
@@ -591,6 +598,86 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn score_history_between(&self, from: &str, to: &str) -> Result<Vec<ScoreHistoryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT entity_id, dimension, old, new, reason, trigger, created_at
+             FROM score_history
+             WHERE created_at >= ?1 AND created_at < ?2
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![from, to], |row| {
+            Ok(ScoreHistoryRow {
+                entity_id: row.get(0)?,
+                dimension: row.get(1)?,
+                old: row.get(2)?,
+                new: row.get(3)?,
+                reason: row.get(4)?,
+                trigger: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn timeline_between(&self, from: &str, to: &str) -> Result<Vec<TimelineRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT entity_id, event_type, intensity, source, created_at
+             FROM timeline
+             WHERE created_at >= ?1 AND created_at < ?2
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![from, to], |row| {
+            Ok(TimelineRow {
+                entity_id: row.get(0)?,
+                event_type: row.get(1)?,
+                intensity: row.get(2)?,
+                source: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn suggestion_stats_between(&self, from: &str, to: &str) -> Result<SuggestionStatsRow> {
+        let mut stmt = self.conn.prepare(
+            "SELECT status, COUNT(*)
+             FROM suggestions
+             WHERE updated_at >= ?1 AND updated_at < ?2
+               AND status IN ('accepted', 'rejected', 'expired')
+             GROUP BY status",
+        )?;
+        let rows = stmt.query_map(params![from, to], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?;
+        let mut stats = SuggestionStatsRow::default();
+        for row in rows {
+            let (status, count) = row?;
+            match status.as_str() {
+                "accepted" => stats.accepted = count,
+                "rejected" => stats.rejected = count,
+                "expired" => stats.expired = count,
+                _ => {}
+            }
+        }
+        Ok(stats)
+    }
+
+    pub fn has_report_history(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                SELECT 1 FROM score_history
+                UNION ALL SELECT 1 FROM timeline
+                UNION ALL SELECT 1 FROM suggestions
+             )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// 从 vault 全量重建索引（清空 entities + FTS，重新扫描写入）。
