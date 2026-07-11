@@ -108,6 +108,10 @@ def http_post(path: str, data: dict) -> dict:
         sys.exit(1)
 
 
+def http_post_empty(path: str) -> dict:
+    return http_post(path, {})
+
+
 def parse_keyval(args: list[str]) -> dict:
     """Parse key=value arguments into a dict."""
     result = {}
@@ -203,6 +207,82 @@ def action_access(params: dict) -> None:
     depth = params.get("depth", "read")
     result = http_patch(f"/entities/{entity_id}/access", {"depth": depth})
     print(json.dumps(result, indent=2))
+
+
+def _required_param(params: dict, name: str) -> str:
+    value = params.get(name, "").strip()
+    if not value:
+        print(json.dumps({"error": f"{name} is required"}), file=sys.stderr)
+        sys.exit(1)
+    return value
+
+
+def _suggestion_id(params: dict) -> str:
+    return params.get("suggestion_id", params.get("id", "")).strip()
+
+
+def action_tag_suggestions(params: dict) -> None:
+    entity_id = _required_param(params, "id")
+    payload = {}
+    if params.get("candidates"):
+        try:
+            candidates = json.loads(params["candidates"])
+        except json.JSONDecodeError as e:
+            print(json.dumps({"error": f"invalid candidates JSON: {e}"}), file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(candidates, list):
+            print(json.dumps({"error": "candidates must be a JSON array"}), file=sys.stderr)
+            sys.exit(1)
+        payload["candidates"] = candidates
+    result = http_post(f"/entities/{urllib.parse.quote(entity_id, safe='')}/tag-suggestions", payload)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def action_related(params: dict) -> None:
+    entity_id = _required_param(params, "id")
+    limit = int(params.get("limit", 10))
+    result = http_get(
+        f"/entities/{urllib.parse.quote(entity_id, safe='')}/related",
+        {"limit": limit},
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def action_suggestion_transition(params: dict, kind: str, transition: str) -> None:
+    suggestion_id = _suggestion_id(params)
+    if not suggestion_id:
+        print(json.dumps({"error": "suggestion_id is required"}), file=sys.stderr)
+        sys.exit(1)
+    result = http_post_empty(
+        f"/{kind}-suggestions/{urllib.parse.quote(suggestion_id, safe='')}/{transition}"
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def action_accept_tag(params: dict) -> None:
+    action_suggestion_transition(params, "tag", "accept")
+
+
+def action_reject_tag(params: dict) -> None:
+    action_suggestion_transition(params, "tag", "reject")
+
+
+def action_accept_related(params: dict) -> None:
+    action_suggestion_transition(params, "related", "accept")
+
+
+def action_reject_related(params: dict) -> None:
+    action_suggestion_transition(params, "related", "reject")
+
+
+def action_weekly(params: dict) -> None:
+    query = {
+        "from": _required_param(params, "from"),
+        "to": _required_param(params, "to"),
+        "tz": _required_param(params, "tz"),
+    }
+    result = http_get("/reports/weekly", query)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _render_search(data) -> str:
@@ -346,6 +426,84 @@ def _render_access(data: dict) -> str:
     return f"✅ 访问已记录：[{eid}]({eid}) - ⭐{composite:.1f}"
 
 
+def _render_tag_suggestions(data: dict) -> str:
+    suggestions = data.get("suggestions", [])
+    if not suggestions:
+        return "没有标签建议。"
+    lines = ["## 标签建议"]
+    for suggestion in suggestions:
+        tag = suggestion.get("tag", "?")
+        confidence = suggestion.get("confidence", 0) or 0
+        status = suggestion.get("status", "pending")
+        reason = suggestion.get("reason", "")
+        line = f"- #{tag} — 置信度 {confidence:.2f}（{status}）"
+        if reason:
+            line += f"：{reason}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_related(data: dict) -> str:
+    suggestions = data.get("suggestions", [])
+    if not suggestions:
+        return "没有关联推荐。"
+    lines = ["## 关联推荐"]
+    for suggestion in suggestions:
+        title = suggestion.get("title") or suggestion.get("id", "?")
+        entity_id = suggestion.get("id", "?")
+        score = suggestion.get("score", 0) or 0
+        status = suggestion.get("status", "pending")
+        reasons = "; ".join(suggestion.get("reasons", []))
+        line = f"- [{title}]({entity_id}) — 推荐分 {score:.3f}（{status}）"
+        if reasons:
+            line += f"：{reasons}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_suggestion_transition(data: dict, kind: str, transition: str) -> str:
+    status = data.get("status", "unknown")
+    if kind == "tag":
+        subject = f"#{data.get('tag', '?')}"
+    else:
+        subject = data.get("title") or data.get("id", "?")
+    verb = "已接受" if transition == "accept" else "已拒绝"
+    if status == "expired":
+        return f"建议已过期，未写回：{subject}。"
+    if status == "rejected":
+        return f"建议已拒绝：{subject}。"
+    if status == "accepted":
+        return f"建议已接受：{subject}。"
+    return f"建议{verb}：{subject}（状态：{status}）。"
+
+
+def _render_weekly(data: dict) -> str:
+    lines = [f"## 周报 {data.get('from', '?')} 至 {data.get('to', '?')}（{data.get('tz', '?')}）"]
+    quality = data.get("data_quality") or {}
+    if quality.get("history_unavailable"):
+        missing = ", ".join(quality.get("missing", [])) or "history"
+        lines.append(f"数据提示：历史数据不可用（缺失：{missing}）。")
+    lines.append(f"评分变化：{len(data.get('score_changes', []))} 个实体")
+    lines.append(f"访问 {data.get('access_count', 0)} 次，复习 {data.get('review_count', 0)} 次")
+    access = data.get("access_stats") or {}
+    if access:
+        lines.append(
+            "访问明细："
+            f"glance {access.get('glance', 0)} / read {access.get('read', 0)} / "
+            f"study {access.get('study', 0)} / apply {access.get('apply', 0)}"
+        )
+    new_entities = data.get("new_entities", [])
+    if new_entities:
+        lines.append("新增实体：" + ", ".join(new_entities))
+    stats = data.get("suggestion_stats") or {}
+    lines.append(
+        "建议处理："
+        f"接受 {stats.get('accepted', 0)} / 拒绝 {stats.get('rejected', 0)} / "
+        f"过期 {stats.get('expired', 0)}"
+    )
+    return "\n".join(lines)
+
+
 def action_render(params: dict) -> None:
     raw = params.get("raw")
     action_name = params.get("action")
@@ -376,8 +534,23 @@ def action_render(params: dict) -> None:
         "create": _render_create,
         "score": _render_score,
         "access": _render_access,
+        "tag_suggestions": _render_tag_suggestions,
+        "tags": _render_tag_suggestions,
+        "related": _render_related,
+        "weekly": _render_weekly,
     }
 
+    transition_renderers = {
+        "accept_tag": ("tag", "accept"),
+        "reject_tag": ("tag", "reject"),
+        "accept_related": ("related", "accept"),
+        "reject_related": ("related", "reject"),
+    }
+
+    if action_name in transition_renderers:
+        kind, transition = transition_renderers[action_name]
+        print(_render_suggestion_transition(data, kind, transition))
+        return
     if action_name not in renderers:
         print(json.dumps({"error": f"unknown action: {action_name}", "available": list(renderers.keys())}), file=sys.stderr)
         sys.exit(1)
@@ -397,6 +570,14 @@ ACTIONS = {
     "create": action_create,
     "score": action_score,
     "access": action_access,
+    "tag_suggestions": action_tag_suggestions,
+    "tags": action_tag_suggestions,
+    "related": action_related,
+    "accept_tag": action_accept_tag,
+    "reject_tag": action_reject_tag,
+    "accept_related": action_accept_related,
+    "reject_related": action_reject_related,
+    "weekly": action_weekly,
     "render": action_render,
 }
 

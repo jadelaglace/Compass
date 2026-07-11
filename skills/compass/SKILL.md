@@ -24,6 +24,9 @@ Every compass interaction follows this exact sequence:
 | "Top 5" / ?? | `compass top` | `top` |
 | "????..." / "???..." / "????..." | `compass access` | `access` |
 | Deep research / ????? | `compass context` | `context` |
+| Tag suggestions | `compass tags` | `tags` |
+| Related notes | `compass related` | `related` |
+| Weekly report | `compass weekly` | `weekly` |
 
 ## compass Actions
 
@@ -51,6 +54,18 @@ compass score id=<entity_id> [interest=<float>] [strategy=<float>] [consensus=<f
 
 # ??????? boost + ???
 compass access id=<entity_id> [depth=glance|read|study|apply]
+
+# Phase 4 suggestions are deterministic API calls. Only accept writes to Vault.
+compass tags id=<entity_id> [candidates='<JSON array>']
+compass accept_tag suggestion_id=<suggestion_id>
+compass reject_tag suggestion_id=<suggestion_id>
+
+compass related id=<entity_id> [limit=10]
+compass accept_related suggestion_id=<suggestion_id>
+compass reject_related suggestion_id=<suggestion_id>
+
+# Weekly reports require an explicit IANA timezone.
+compass weekly from=YYYY-MM-DD to=YYYY-MM-DD tz=Asia/Shanghai
 ```
 
 ## compass render ? JSON to Human Text
@@ -71,6 +86,11 @@ compass render raw=<JSON string> action=<action_name>
 | `create` | `? ????[??](id)` |
 | `score` | `? ??????[id](id) - ?X.X` |
 | `access` | `? ??????[id](id) - ?X.X` |
+| `tags` | tag suggestions or an empty-state response |
+| `related` | explainable related-note suggestions or an empty-state response |
+| `accept_tag` / `reject_tag` | accepted, rejected, or expired tag result |
+| `accept_related` / `reject_related` | accepted, rejected, or expired link result |
+| `weekly` | structured weekly report with data-quality notice |
 
 ## Feishu Coordination
 
@@ -87,6 +107,8 @@ compass render raw=<JSON string> action=<action_name>
 - **??**?**?? `interest`** ?? `new = max(interest?0.5, interest?0.98^days_inactive)`?`strategy` / `consensus` ????
 - **???**???? ? consensus +2??????? ? interest +1??? boost ????`glance` +0 / `read` +1 / `study` +3 / `apply` +2(interest)+5(strategy)?
 - **??**????? `[[wiki-links]]` ???
+- **Phase 4 suggestions**: suggestions and related notes are read-only until an explicit `accept_*`; `reject_*` never writes Vault. An `expired` response means the content changed and no write occurred.
+- **Weekly report**: pass `from`, `to`, and an IANA `tz`; Compass returns data and the skill renders it, without sending messages itself.
 
 ## Error Handling
 

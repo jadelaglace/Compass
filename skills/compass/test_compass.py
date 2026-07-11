@@ -200,6 +200,96 @@ class TestRenderCLI(unittest.TestCase):
         self.assertIn("访问已记录", out)
         self.assertIn("91.7", out)
 
+    def test_render_tag_suggestions_success_and_empty(self):
+        raw = json.dumps(
+            {
+                "entity_id": "know000001",
+                "suggestions": [
+                    {
+                        "tag": "game-theory",
+                        "confidence": 0.82,
+                        "reason": "shared terms",
+                        "status": "pending",
+                    }
+                ],
+            }
+        )
+        out, err, rc = run(
+            [sys.executable, COMPASS_SCRIPT, "render", f"raw={raw}", "action=tags"]
+        )
+        self.assertEqual(rc, 0, f"stderr: {err}")
+        self.assertIn("game-theory", out)
+        self.assertIn("0.82", out)
+
+        out, err, rc = run(
+            [sys.executable, COMPASS_SCRIPT, "render", 'raw={"suggestions":[]}', "action=tags"]
+        )
+        self.assertEqual(rc, 0, f"stderr: {err}")
+        self.assertIn("没有标签建议", out)
+
+    def test_render_related_success_and_empty(self):
+        raw = json.dumps(
+            {
+                "entity_id": "know000001",
+                "suggestions": [
+                    {
+                        "id": "know000002",
+                        "title": "Related Note",
+                        "score": 0.735,
+                        "reasons": ["shared terms: 2"],
+                        "status": "pending",
+                    }
+                ],
+            }
+        )
+        out, err, rc = run(
+            [sys.executable, COMPASS_SCRIPT, "render", f"raw={raw}", "action=related"]
+        )
+        self.assertEqual(rc, 0, f"stderr: {err}")
+        self.assertIn("Related Note", out)
+        self.assertIn("0.735", out)
+
+        out, err, rc = run(
+            [sys.executable, COMPASS_SCRIPT, "render", 'raw={"suggestions":[]}', "action=related"]
+        )
+        self.assertEqual(rc, 0, f"stderr: {err}")
+        self.assertIn("没有关联推荐", out)
+
+    def test_render_suggestion_transitions_and_weekly_report(self):
+        for action, status, expected in (
+            ("accept_tag", "accepted", "建议已接受"),
+            ("reject_tag", "rejected", "建议已拒绝"),
+            ("accept_related", "expired", "建议已过期"),
+            ("reject_related", "rejected", "建议已拒绝"),
+        ):
+            raw = json.dumps({"tag": "topic", "id": "know000001", "status": status})
+            out, err, rc = run(
+                [sys.executable, COMPASS_SCRIPT, "render", f"raw={raw}", f"action={action}"]
+            )
+            self.assertEqual(rc, 0, f"stderr: {err}")
+            self.assertIn(expected, out)
+
+        raw = json.dumps(
+            {
+                "from": "2026-07-06",
+                "to": "2026-07-13",
+                "tz": "Asia/Shanghai",
+                "data_quality": {"history_unavailable": True, "missing": ["history"]},
+                "score_changes": [],
+                "access_count": 0,
+                "review_count": 0,
+                "access_stats": {"glance": 0, "read": 0, "study": 0, "apply": 0},
+                "new_entities": [],
+                "suggestion_stats": {"accepted": 0, "rejected": 0, "expired": 0},
+            }
+        )
+        out, err, rc = run(
+            [sys.executable, COMPASS_SCRIPT, "render", f"raw={raw}", "action=weekly"]
+        )
+        self.assertEqual(rc, 0, f"stderr: {err}")
+        self.assertIn("周报", out)
+        self.assertIn("历史数据不可用", out)
+
     def test_render_unknown_action(self):
         out, err, rc = run(
             [sys.executable, COMPASS_SCRIPT, "render", 'raw={"id":"x"}', "action=unknown"]
