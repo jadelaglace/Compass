@@ -66,10 +66,23 @@ pub struct RelatedSuggestion {
     pub composite: Option<f64>,
     pub score: f64,
     pub reasons: Vec<String>,
+    #[serde(default)]
+    pub signals: RelatedSignals,
     pub content_hash: String,
     pub source: String,
     pub algorithm_version: String,
     pub status: SuggestionStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RelatedSignals {
+    pub term_overlap: usize,
+    pub tag_overlap: usize,
+    pub shared_neighbors: usize,
+    pub term_signal: f64,
+    pub tag_signal: f64,
+    pub graph_signal: f64,
+    pub composite_signal: f64,
 }
 
 impl TagSuggestion {
