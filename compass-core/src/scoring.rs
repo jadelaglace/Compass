@@ -1,15 +1,15 @@
-//! 评分引擎核心：综合分 + 衰减 + 触发器（T1.1 + T1.3）。
+//! 评分引擎核心：基础分、实时有效分与触发器（T1.1 + T4.9）。
 //!
 //! 不变量：
 //! 1. composite = interest*0.40 + strategy*0.35 + consensus*0.25（默认权重）
-//! 2. 衰减只作用于 interest：new = max(interest*floor, interest*rate^days)
-//! 3. 触发器/访问 boost 只增不减（除衰减外），各维度 clamp 到 [0,100]
+//! 2. 时间修正只在读取时生成 effective score，不写回基础分
+//! 3. 触发器/访问 boost 修改基础分，各维度 clamp 到 [0,100]
 
 use anyhow::Result;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::models::{Score, Weights};
+use crate::models::{EffectiveScore, Freshness, FreshnessMode, Score, Weights};
 
 // ============ 综合分（T1.1） ============
 
@@ -20,15 +20,49 @@ pub fn composite(interest: f64, strategy: f64, consensus: f64, w: &Weights) -> f
     rounded.clamp(0.0, 100.0)
 }
 
-/// interest 维度衰减。每日 rate，地板 floor（相对初始值）。
-/// strategy / consensus 不衰减（由签名结构性保证）。
-/// days_inactive <= 0 视为无衰减，返回原值。
-pub fn decay_interest(interest: f64, days_inactive: i64, daily_rate: f64, floor: f64) -> f64 {
-    if days_inactive <= 0 {
-        return interest;
-    }
-    let decayed = interest * daily_rate.powi(days_inactive as i32);
-    decayed.max(interest * floor)
+/// Computes the display/query score without mutating the persisted base score.
+pub fn effective_score(
+    base_composite: f64,
+    freshness: &Freshness,
+    content_updated_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Result<EffectiveScore> {
+    let factor = match freshness.mode {
+        FreshnessMode::Evergreen => 1.0,
+        FreshnessMode::Decay => {
+            let Some(updated_at) = content_updated_at else {
+                return Err(anyhow::anyhow!(
+                    "decay freshness requires content_updated_at"
+                ));
+            };
+            let half_life_days = freshness.half_life_days.unwrap_or(90.0);
+            if !half_life_days.is_finite() || half_life_days <= 0.0 {
+                return Err(anyhow::anyhow!("half_life_days must be greater than zero"));
+            }
+            let floor = freshness.floor.unwrap_or(0.4).clamp(0.0, 1.0);
+            let age_days = (now - updated_at).num_seconds().max(0) as f64 / 86_400.0;
+            floor + (1.0 - floor) * 0.5_f64.powf(age_days / half_life_days)
+        }
+        FreshnessMode::Expires => {
+            let valid_until = freshness
+                .valid_until
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("expires freshness requires valid_until"))?;
+            let valid_until = DateTime::parse_from_rfc3339(valid_until)
+                .map_err(|error| anyhow::anyhow!("invalid valid_until: {error}"))?
+                .with_timezone(&Utc);
+            if now <= valid_until {
+                1.0
+            } else {
+                freshness.floor.unwrap_or(0.0).clamp(0.0, 1.0)
+            }
+        }
+    };
+    Ok(EffectiveScore {
+        base_composite,
+        freshness_factor: factor,
+        effective_composite: base_composite * factor,
+    })
 }
 
 // ============ 触发器与访问深度（T1.3，PRD §5.3） ============
@@ -231,27 +265,46 @@ mod tests {
     }
 
     #[test]
-    fn test_decay_30_days_half() {
-        let new = decay_interest(100.0, 30, 0.98, 0.5);
-        assert!(new > 50.0 && new < 55.0);
+    fn effective_score_is_read_time_only_and_preserves_base_score() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Decay,
+            half_life_days: Some(30.0),
+            floor: Some(0.4),
+            valid_until: None,
+        };
+        let first = effective_score(
+            80.0,
+            &freshness,
+            Some(now - chrono::Duration::days(30)),
+            now,
+        )
+        .unwrap();
+        let later = effective_score(
+            80.0,
+            &freshness,
+            Some(now - chrono::Duration::days(30)),
+            now + chrono::Duration::days(30),
+        )
+        .unwrap();
+        assert_eq!(first.base_composite, 80.0);
+        assert_eq!(later.base_composite, 80.0);
+        assert!((first.freshness_factor - 0.7).abs() < 1e-9);
+        assert!(later.effective_composite < first.effective_composite);
     }
 
     #[test]
-    fn test_decay_floor_enforced() {
-        let new = decay_interest(100.0, 200, 0.98, 0.5);
-        assert!((new - 50.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_decay_zero_days_noop() {
-        let new = decay_interest(85.0, 0, 0.98, 0.5);
-        assert!((new - 85.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_decay_negative_days_noop() {
-        let new = decay_interest(85.0, -5, 0.98, 0.5);
-        assert!((new - 85.0).abs() < 1e-9);
+    fn evergreen_effective_score_never_decays() {
+        let now = Utc::now();
+        let score = effective_score(
+            80.0,
+            &Freshness::default(),
+            Some(now - chrono::Duration::days(10_000)),
+            now,
+        )
+        .unwrap();
+        assert_eq!(score.freshness_factor, 1.0);
+        assert_eq!(score.effective_composite, 80.0);
     }
 
     #[test]

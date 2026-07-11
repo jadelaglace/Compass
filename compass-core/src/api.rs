@@ -13,7 +13,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use chrono::{NaiveDate, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -45,6 +45,8 @@ pub struct EntitySummary {
     pub title: Option<String>,
     pub layer: Option<String>,
     pub composite: Option<f64>,
+    pub base_composite: Option<f64>,
+    pub freshness_factor: Option<f64>,
     pub strategy: Option<f64>,
     pub last_boosted_at: Option<String>,
 }
@@ -55,6 +57,8 @@ pub struct ScoreResponse {
     pub strategy: f64,
     pub consensus: f64,
     pub composite: f64,
+    pub base_composite: f64,
+    pub freshness_factor: f64,
     pub access_count: i64,
     pub updated_at: Option<String>,
 }
@@ -76,6 +80,8 @@ pub struct GraphNode {
     pub title: Option<String>,
     pub layer: Option<String>,
     pub composite: Option<f64>,
+    pub base_composite: Option<f64>,
+    pub freshness_factor: Option<f64>,
 }
 
 /// 引力场边
@@ -99,6 +105,8 @@ pub struct SearchHit {
     pub snippet: Option<String>,
     pub layer: Option<String>,
     pub composite: Option<f64>,
+    pub base_composite: Option<f64>,
+    pub freshness_factor: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +153,8 @@ pub struct AgentContextEntry {
     pub title: Option<String>,
     pub content: Option<String>,
     pub composite: Option<f64>,
+    pub base_composite: Option<f64>,
+    pub freshness_factor: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -432,6 +442,39 @@ fn local_midnight_utc(date: NaiveDate, tz: Tz, field: &str) -> Result<String, Ap
         .to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
+fn effective_score_for_entity(
+    vault: &std::path::Path,
+    entity: &EntityRow,
+    now: DateTime<Utc>,
+) -> Result<crate::models::EffectiveScore, AppError> {
+    let base_composite = entity.composite.unwrap_or(0.0);
+    let file_path = vault.join(&entity.file_path);
+    if !file_path.exists() {
+        return Ok(crate::models::EffectiveScore {
+            base_composite,
+            freshness_factor: 1.0,
+            effective_composite: base_composite,
+        });
+    }
+    let note = frontmatter::read_note(&file_path)
+        .map_err(|error| AppError::internal(&format!("读取 freshness 元数据失败: {error}")))?;
+    let freshness = frontmatter::get_freshness(&note.frontmatter)
+        .map_err(|error| AppError::unprocessable(&format!("invalid freshness: {error}")))?;
+    let content_updated_at = frontmatter::content_updated_at(&note.frontmatter)
+        .map_err(|error| AppError::unprocessable(&format!("invalid content_updated_at: {error}")))?
+        .or_else(|| entity.updated_at.clone())
+        .map(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .map(|datetime| datetime.with_timezone(&Utc))
+                .map_err(|error| {
+                    AppError::unprocessable(&format!("invalid content_updated_at: {error}"))
+                })
+        })
+        .transpose()?;
+    scoring::effective_score(base_composite, &freshness, content_updated_at, now)
+        .map_err(|error| AppError::unprocessable(&error.to_string()))
+}
+
 pub(crate) async fn feed(
     State(state): State<AppState>,
     Query(q): Query<FeedQuery>,
@@ -443,17 +486,23 @@ pub(crate) async fn feed(
     }
     let db = state.db.lock().await;
     let entities = db.list_entities()?;
-    let mut summaries: Vec<EntitySummary> = entities
-        .into_iter()
-        .map(|e| EntitySummary {
-            id: e.id,
-            title: e.title,
-            layer: e.layer,
-            composite: e.composite,
-            strategy: e.strategy,
-            last_boosted_at: e.last_boosted_at,
-        })
-        .collect();
+    let now = Utc::now();
+    let mut summaries = Vec::with_capacity(entities.len());
+    for entity in entities {
+        let effective = effective_score_for_entity(&state.vault, &entity, now)?;
+        summaries.push(EntitySummary {
+            id: entity.id,
+            title: entity.title,
+            layer: entity.layer,
+            composite: Some(effective.effective_composite),
+            base_composite: Some(effective.base_composite),
+            freshness_factor: Some(effective.freshness_factor),
+            strategy: entity
+                .strategy
+                .map(|value| value * effective.freshness_factor),
+            last_boosted_at: entity.last_boosted_at,
+        });
+    }
     match q.mode.as_str() {
         "strategic" => {
             summaries.sort_by(|a, b| {
@@ -491,22 +540,27 @@ pub(crate) async fn entities_top(
 ) -> Result<Json<Vec<EntitySummary>>, AppError> {
     let db = state.db.lock().await;
     let entities = db.list_entities()?;
-    let mut summaries: Vec<EntitySummary> = entities
-        .into_iter()
-        .filter(|e| {
-            q.layer
-                .as_deref()
-                .is_none_or(|l| e.layer.as_deref() == Some(l))
-        })
-        .map(|e| EntitySummary {
-            id: e.id,
-            title: e.title,
-            layer: e.layer,
-            composite: e.composite,
-            strategy: e.strategy,
-            last_boosted_at: e.last_boosted_at,
-        })
-        .collect();
+    let now = Utc::now();
+    let mut summaries = Vec::new();
+    for entity in entities.into_iter().filter(|entity| {
+        q.layer
+            .as_deref()
+            .is_none_or(|layer| entity.layer.as_deref() == Some(layer))
+    }) {
+        let effective = effective_score_for_entity(&state.vault, &entity, now)?;
+        summaries.push(EntitySummary {
+            id: entity.id,
+            title: entity.title,
+            layer: entity.layer,
+            composite: Some(effective.effective_composite),
+            base_composite: Some(effective.base_composite),
+            freshness_factor: Some(effective.freshness_factor),
+            strategy: entity
+                .strategy
+                .map(|value| value * effective.freshness_factor),
+            last_boosted_at: entity.last_boosted_at,
+        });
+    }
     summaries.sort_by(|a, b| {
         b.composite
             .unwrap_or(0.0)
@@ -527,11 +581,14 @@ pub(crate) async fn get_entity(
         .ok_or_else(|| AppError::not_found(&id))?;
     let file_path = state.vault.join(&entity.file_path);
     let refs = extract_refs(&file_path).unwrap_or_default();
-    let score = entity.composite.map(|composite| ScoreResponse {
+    let effective = effective_score_for_entity(&state.vault, &entity, Utc::now())?;
+    let score = entity.composite.map(|_| ScoreResponse {
         interest: entity.interest.unwrap_or(0.0),
         strategy: entity.strategy.unwrap_or(0.0),
         consensus: entity.consensus.unwrap_or(0.0),
-        composite,
+        composite: effective.effective_composite,
+        base_composite: effective.base_composite,
+        freshness_factor: effective.freshness_factor,
         access_count: entity.access_count,
         updated_at: entity.updated_at.clone(),
     });
@@ -552,25 +609,29 @@ pub(crate) async fn search(
 ) -> Result<Json<Vec<SearchHit>>, AppError> {
     let db = state.db.lock().await;
     let hits = db.fts_search(&q.q, q.limit)?;
-    let results: Vec<SearchHit> = hits
-        .into_iter()
-        .map(|h| {
-            // 补充 composite/layer 供 skill render 显示评分与分类
-            let (layer, composite) = db
-                .get_entity(&h.id)
-                .ok()
-                .flatten()
-                .map(|e| (e.layer, e.composite))
-                .unwrap_or((None, None));
-            SearchHit {
-                id: h.id,
-                title: h.title,
-                snippet: h.snippet,
-                layer,
-                composite,
-            }
-        })
-        .collect();
+    let now = Utc::now();
+    let mut results = Vec::with_capacity(hits.len());
+    for hit in hits {
+        let entity = db
+            .get_entity(&hit.id)?
+            .ok_or_else(|| AppError::not_found(&hit.id))?;
+        let effective = effective_score_for_entity(&state.vault, &entity, now)?;
+        results.push(SearchHit {
+            id: hit.id,
+            title: hit.title,
+            snippet: hit.snippet,
+            layer: entity.layer,
+            composite: Some(effective.effective_composite),
+            base_composite: Some(effective.base_composite),
+            freshness_factor: Some(effective.freshness_factor),
+        });
+    }
+    results.sort_by(|left, right| {
+        right
+            .composite
+            .partial_cmp(&left.composite)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(Json(results))
 }
 
@@ -629,7 +690,8 @@ pub(crate) async fn tag_suggestions(
             .collect::<Result<Vec<_>, AppError>>()?,
     };
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now_time = chrono::Utc::now();
+    let now = now_time.to_rfc3339();
     let mut suggestions = Vec::new();
     for (tag, confidence, reason, source, algorithm_version, candidate_hash) in candidates {
         if existing
@@ -787,7 +849,8 @@ pub(crate) async fn related_entities(
         .directly_linked_entities(&id)?
         .into_iter()
         .collect::<HashSet<_>>();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now_time = chrono::Utc::now();
+    let now = now_time.to_rfc3339();
     let mut ranked = Vec::new();
 
     for candidate in db.list_entities()? {
@@ -819,8 +882,8 @@ pub(crate) async fn related_entities(
         let term_signal = (term_overlap as f64 / 5.0).min(1.0) * 0.45;
         let tag_signal = (tag_overlap as f64 / 3.0).min(1.0) * 0.30;
         let graph_signal = (shared_neighbors as f64 / 2.0).min(1.0) * 0.15;
-        let composite_signal =
-            (candidate.composite.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0) * 0.10;
+        let effective = effective_score_for_entity(&state.vault, &candidate, now_time)?;
+        let composite_signal = (effective.effective_composite.clamp(0.0, 100.0) / 100.0) * 0.10;
         let score = term_signal + tag_signal + graph_signal + composite_signal;
         if score <= 0.0 {
             continue;
@@ -845,19 +908,21 @@ pub(crate) async fn related_entities(
             graph_signal,
             composite_signal,
         };
-        ranked.push((candidate, score, reasons, signals));
+        ranked.push((candidate, score, reasons, signals, effective));
     }
 
-    ranked.sort_by(|(left, left_score, _, _), (right, right_score, _, _)| {
-        right_score
-            .partial_cmp(left_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.id.cmp(&right.id))
-    });
+    ranked.sort_by(
+        |(left, left_score, _, _, _), (right, right_score, _, _, _)| {
+            right_score
+                .partial_cmp(left_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.id.cmp(&right.id))
+        },
+    );
     ranked.truncate(query.limit.min(20) as usize);
 
     let mut suggestions = Vec::new();
-    for (candidate, score, reasons, signals) in ranked {
+    for (candidate, score, reasons, signals, effective) in ranked {
         let reason = serde_json::to_string(&serde_json::json!({
             "reasons": reasons,
             "signals": signals,
@@ -887,7 +952,11 @@ pub(crate) async fn related_entities(
         };
         db.upsert_suggestion(&suggestion)?;
         if let Some(row) = db.get_suggestion(&suggestion.suggestion_id)? {
-            suggestions.push(related_suggestion_json(&row, &candidate, score)?);
+            let mut response = related_suggestion_json(&row, &candidate, score)?;
+            response["composite"] = serde_json::json!(effective.effective_composite);
+            response["base_composite"] = serde_json::json!(effective.base_composite);
+            response["freshness_factor"] = serde_json::json!(effective.freshness_factor);
+            suggestions.push(response);
         }
     }
     Ok(Json(serde_json::json!({
@@ -1020,7 +1089,7 @@ pub(crate) async fn create_entity(
     let now = chrono::Utc::now().to_rfc3339();
     let content = req.content.unwrap_or_default();
     let md = format!(
-        "---\nid: {id}\ntitle: {}\nlayer: {}\nstatus: active\nscore:\n  interest: {interest}\n  strategy: {strategy}\n  consensus: {consensus}\n  composite: {composite}\n  weights:\n    interest: {}\n    strategy: {}\n    consensus: {}\n  updated_at: '{now}'\n  last_boosted_at: '{now}'\n  access_count: 0\n---\n{content}\n",
+        "---\nid: {id}\ntitle: {}\nlayer: {}\nstatus: active\ncreated_at: '{now}'\ncontent_updated_at: '{now}'\nscore:\n  interest: {interest}\n  strategy: {strategy}\n  consensus: {consensus}\n  composite: {composite}\n  weights:\n    interest: {}\n    strategy: {}\n    consensus: {}\n  updated_at: '{now}'\n  last_boosted_at: '{now}'\n  access_count: 0\n---\n{content}\n",
         req.title, req.layer,
         state.weights.interest, state.weights.strategy, state.weights.consensus
     );
@@ -1217,11 +1286,14 @@ pub(crate) async fn agent_context(
             Some(e) => e,
             None => continue,
         };
+        let effective = effective_score_for_entity(&state.vault, &entity, Utc::now())?;
         entries.push(AgentContextEntry {
             id: entity.id,
             title: hit.title,
             content: hit.snippet,
-            composite: entity.composite,
+            composite: Some(effective.effective_composite),
+            base_composite: Some(effective.base_composite),
+            freshness_factor: Some(effective.freshness_factor),
         });
     }
     entries.sort_by(|a, b| {
@@ -1251,12 +1323,16 @@ pub(crate) async fn graph(State(state): State<AppState>) -> Result<Json<GraphDat
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
+    let now = Utc::now();
     for entity in &entities {
+        let effective = effective_score_for_entity(&state.vault, entity, now)?;
         nodes.push(GraphNode {
             id: entity.id.clone(),
             title: entity.title.clone(),
             layer: entity.layer.clone(),
-            composite: entity.composite,
+            composite: Some(effective.effective_composite),
+            base_composite: Some(effective.base_composite),
+            freshness_factor: Some(effective.freshness_factor),
         });
 
         // 提取 [[id]] 引用作为边
@@ -1732,7 +1808,6 @@ mod tests {
             auth_token: auth_token.map(str::to_string),
             request_body_limit_bytes: limit,
             db_path: None,
-            decay: crate::config::DecayConfig::default(),
             weights: Weights::default(),
         }
     }
@@ -3040,5 +3115,38 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, AppError::Unprocessable(_)));
+    }
+
+    #[tokio::test]
+    async fn feed_exposes_dynamic_effective_score_without_writing_note() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let path = dir.path().join("old.md");
+        let content = "---\nid: know-old\ntitle: Old\nlayer: knowledge\nfreshness:\n  mode: decay\n  half_life_days: 30\n  floor: 0.4\ncontent_updated_at: '2026-01-01T00:00:00Z'\nscore:\n  interest: 80.0\n  strategy: 80.0\n  consensus: 80.0\n  composite: 80.0\n  updated_at: '2026-01-01T00:00:00Z'\n  last_boosted_at: '2026-01-01T00:00:00Z'\n  access_count: 0\n---\nold body\n";
+        fs::write(&path, content).unwrap();
+        state
+            .db
+            .lock()
+            .await
+            .upsert_entity(
+                &sample_entity("know-old", "old.md", 80.0, "knowledge"),
+                "old body",
+            )
+            .unwrap();
+
+        let response = feed(
+            State(state),
+            Query(FeedQuery {
+                mode: "explore".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response[0].base_composite, Some(80.0));
+        assert!(response[0].freshness_factor.unwrap() < 1.0);
+        assert!(response[0].composite.unwrap() < 80.0);
+        assert_eq!(fs::read_to_string(path).unwrap(), content);
     }
 }

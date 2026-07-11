@@ -118,9 +118,14 @@ compass render raw=<JSON string> action=<action_name>
 
 ## Environment
 
+`score.composite` is the stable base score. Compass derives a read-time effective score from
+optional freshness metadata; default `evergreen` notes are not time-discounted and no scheduler
+mutates scores.
+
 | ?? | ??? |
 |------|--------|
 | `COMPASS_API_URL` | `http://localhost:8080` |
+| `COMPASS_API_TOKEN` | Optional Bearer token sent on every HTTP request |
 
 ## Compass Server?Rust ?????
 

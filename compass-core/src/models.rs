@@ -58,3 +58,32 @@ pub struct Score {
     #[serde(default)]
     pub access_count: i64,
 }
+
+/// Knowledge freshness controls the read-time adjustment applied to a base score.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshnessMode {
+    #[default]
+    Evergreen,
+    Decay,
+    Expires,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct Freshness {
+    #[serde(default)]
+    pub mode: FreshnessMode,
+    #[serde(default)]
+    pub half_life_days: Option<f64>,
+    #[serde(default)]
+    pub floor: Option<f64>,
+    #[serde(default)]
+    pub valid_until: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveScore {
+    pub base_composite: f64,
+    pub freshness_factor: f64,
+    pub effective_composite: f64,
+}

@@ -7,9 +7,12 @@ Compass skill 自动化测试：覆盖 CLI render 与参数解析。
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 import unittest
+import urllib.request
+from unittest import mock
 
 COMPASS_DIR = os.path.dirname(os.path.abspath(__file__))
 COMPASS_SCRIPT = os.path.join(COMPASS_DIR, "compass")
@@ -324,6 +327,18 @@ class TestRenderCLI(unittest.TestCase):
 
 
 class TestCLI(unittest.TestCase):
+    def test_optional_api_token_is_sent_as_bearer(self):
+        module = runpy.run_path(COMPASS_SCRIPT)
+        request = urllib.request.Request("http://example.test/health")
+        with mock.patch.dict(os.environ, {"COMPASS_API_TOKEN": "test-token"}, clear=False):
+            module["add_auth_header"](request)
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+    def test_api_url_uses_environment_override(self):
+        module = runpy.run_path(COMPASS_SCRIPT)
+        with mock.patch.dict(os.environ, {"COMPASS_API_URL": "http://127.0.0.1:18080/base/"}, clear=False):
+            self.assertEqual(module["api_url"]("/health"), "http://127.0.0.1:18080/base/health")
+
     def test_help_flag(self):
         out, err, rc = run([sys.executable, COMPASS_SCRIPT, "--help"])
         self.assertEqual(rc, 0)
