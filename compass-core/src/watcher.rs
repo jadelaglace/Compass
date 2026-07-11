@@ -156,14 +156,8 @@ pub(crate) async fn process_single_file(
     if !path.exists() {
         let relative = rel_path(vault, path);
         let db = db.lock().await;
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            if let Some(id) = db.entity_id_by_file_path(&relative)? {
-                info!(id = %id, path = %path.display(), "deleting entity");
-                db.delete_entity(&id)?;
-            }
-        } else {
-            db.delete_entities_under_path(&relative)?;
-        }
+        info!(path = %path.display(), "deleting entity index path");
+        db.delete_entities_under_path(&relative)?;
         return Ok(());
     }
 
