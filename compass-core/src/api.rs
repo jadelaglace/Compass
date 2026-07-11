@@ -3,7 +3,7 @@
 //! 字段统一（#160）：响应用 `id`/`composite`（PRD v3.0），非 v2.x 的 `entity_id`/`final_score`。
 //! 写回端点（score/access/create）：读 frontmatter -> 改 score -> 原子写回 -> 更新 SQLite。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,14 +13,17 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use chrono::{NaiveDate, SecondsFormat, TimeZone, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::config::Config;
 use crate::contracts::{
-    candidate_key, note_content_hash, stable_suggestion_id, RelatedSignals, RelatedSuggestion,
-    SuggestionKind, SuggestionStatus, TagSuggestion, RELATED_ALGORITHM_VERSION,
+    candidate_key, note_content_hash, stable_suggestion_id, AccessStats, DataQuality,
+    RelatedSignals, RelatedSuggestion, ScoreChangeFixture, SuggestionKind, SuggestionStats,
+    SuggestionStatus, TagSuggestion, WeeklyReport, RELATED_ALGORITHM_VERSION,
     TAG_ALGORITHM_VERSION,
 };
 use crate::db::{Db, EntityRow, SuggestionRow};
@@ -202,6 +205,21 @@ pub struct RelatedQuery {
     pub limit: u32,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct WeeklyReportQuery {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub tz: Option<String>,
+}
+
+struct ReportWindow {
+    from: NaiveDate,
+    to: NaiveDate,
+    tz: Tz,
+    start_utc: String,
+    end_utc: String,
+}
+
 fn default_related_limit() -> u32 {
     10
 }
@@ -231,6 +249,7 @@ pub fn router(state: AppState) -> Router {
             "/related-suggestions/:suggestion_id/reject",
             post(reject_related_suggestion),
         )
+        .route("/reports/weekly", get(weekly_report))
         .route("/entities", post(create_entity))
         .route("/entities/:id/score", patch(update_score))
         .route("/entities/:id/access", patch(record_access))
@@ -245,6 +264,172 @@ pub(crate) async fn health() -> Json<serde_json::Value> {
         "name": "compass",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+pub(crate) async fn weekly_report(
+    State(state): State<AppState>,
+    Query(query): Query<WeeklyReportQuery>,
+) -> Result<Json<WeeklyReport>, AppError> {
+    let window = parse_report_window(&query)?;
+    let db = state.db.lock().await;
+    let score_history = db.score_history_between(&window.start_utc, &window.end_utc)?;
+    let timeline = db.timeline_between(&window.start_utc, &window.end_utc)?;
+    let suggestion_stats = db.suggestion_stats_between(&window.start_utc, &window.end_utc)?;
+    let history_unavailable = !db.has_report_history()?;
+
+    let mut deltas = HashMap::<String, f64>::new();
+    for row in score_history {
+        if let (Some(old), Some(new)) = (row.old, row.new) {
+            let delta = new - old;
+            if delta.is_finite() {
+                *deltas.entry(row.entity_id).or_default() += delta;
+            }
+        }
+    }
+    let mut changes = deltas
+        .into_iter()
+        .filter(|(_, delta)| delta.abs() > f64::EPSILON)
+        .map(|(entity_id, delta)| ScoreChangeFixture { entity_id, delta })
+        .collect::<Vec<_>>();
+    changes.sort_by(|left, right| {
+        right
+            .delta
+            .partial_cmp(&left.delta)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+    });
+    let score_increases = changes
+        .iter()
+        .filter(|change| change.delta > 0.0)
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut score_decreases = changes
+        .iter()
+        .filter(|change| change.delta < 0.0)
+        .cloned()
+        .collect::<Vec<_>>();
+    score_decreases.sort_by(|left, right| {
+        left.delta
+            .partial_cmp(&right.delta)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+    });
+    score_decreases.truncate(5);
+    let mut score_changes = score_increases.clone();
+    score_changes.extend(score_decreases.clone());
+
+    let mut access_stats = AccessStats {
+        total: 0,
+        glance: 0,
+        read: 0,
+        study: 0,
+        apply: 0,
+        review: 0,
+    };
+    let mut new_entities = Vec::new();
+    let mut seen_new_entities = HashSet::new();
+    for event in timeline {
+        if event.event_type == "create" {
+            if seen_new_entities.insert(event.entity_id.clone()) {
+                new_entities.push(event.entity_id);
+            }
+            continue;
+        }
+        if event.event_type != "access" {
+            continue;
+        }
+        access_stats.total += 1;
+        match event.intensity.unwrap_or_default() {
+            intensity if intensity <= 0.0 => access_stats.glance += 1,
+            intensity if intensity < 3.0 => access_stats.read += 1,
+            intensity if intensity < 5.0 => {
+                access_stats.study += 1;
+                access_stats.review += 1;
+            }
+            _ => {
+                access_stats.apply += 1;
+                access_stats.review += 1;
+            }
+        }
+    }
+
+    let generated_at = format!("{}T00:00:00Z", window.to.format("%Y-%m-%d"));
+    Ok(Json(WeeklyReport {
+        from: window.from.format("%Y-%m-%d").to_string(),
+        to: window.to.format("%Y-%m-%d").to_string(),
+        tz: window.tz.to_string(),
+        generated_at,
+        data_quality: DataQuality {
+            history_unavailable,
+            missing: if history_unavailable {
+                vec!["history".to_string()]
+            } else {
+                Vec::new()
+            },
+        },
+        score_changes,
+        score_increases,
+        score_decreases,
+        access_count: access_stats.total,
+        review_count: access_stats.review,
+        access_stats,
+        new_entities,
+        suggestion_stats: SuggestionStats {
+            accepted: suggestion_stats.accepted,
+            rejected: suggestion_stats.rejected,
+            expired: suggestion_stats.expired,
+        },
+    }))
+}
+
+fn parse_report_window(query: &WeeklyReportQuery) -> Result<ReportWindow, AppError> {
+    let from = parse_report_date(query.from.as_deref(), "from")?;
+    let to = parse_report_date(query.to.as_deref(), "to")?;
+    if from >= to {
+        return Err(AppError::unprocessable("from must be before to"));
+    }
+    let tz_name = query
+        .tz
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::unprocessable("tz is required"))?;
+    let tz = tz_name
+        .parse::<Tz>()
+        .map_err(|_| AppError::unprocessable("tz must be a valid IANA timezone"))?;
+    let start_utc = local_midnight_utc(from, tz, "from")?;
+    let end_utc = local_midnight_utc(to, tz, "to")?;
+    Ok(ReportWindow {
+        from,
+        to,
+        tz,
+        start_utc,
+        end_utc,
+    })
+}
+
+fn parse_report_date(value: Option<&str>, field: &str) -> Result<NaiveDate, AppError> {
+    let value = value.ok_or_else(|| AppError::unprocessable(&format!("{field} is required")))?;
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| AppError::unprocessable(&format!("{field} must be YYYY-MM-DD")))
+}
+
+fn local_midnight_utc(date: NaiveDate, tz: Tz, field: &str) -> Result<String, AppError> {
+    let local = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| AppError::unprocessable(&format!("invalid {field} date")))?;
+    let datetime = match tz.from_local_datetime(&local) {
+        chrono::LocalResult::Single(value) => value,
+        chrono::LocalResult::Ambiguous(earliest, _) => earliest,
+        chrono::LocalResult::None => {
+            return Err(AppError::unprocessable(&format!(
+                "invalid {field} local midnight"
+            )))
+        }
+    };
+    Ok(datetime
+        .with_timezone(&Utc)
+        .to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 pub(crate) async fn feed(
@@ -846,9 +1031,16 @@ pub(crate) async fn create_entity(
         access_count: 0,
         last_boosted_at: Some(now.clone()),
         content_hash: Some(content_hash(&content)),
-        updated_at: Some(now),
+        updated_at: Some(now.clone()),
     };
     db.upsert_entity(&entity, &content)?;
+    db.insert_timeline(&crate::db::TimelineRow {
+        entity_id: id.clone(),
+        event_type: "create".to_string(),
+        intensity: None,
+        source: Some("api".to_string()),
+        created_at: now.clone(),
+    })?;
     info!(id = %id, "entity created");
     Ok((
         StatusCode::CREATED,
@@ -1360,6 +1552,7 @@ fn content_hash(s: &str) -> String {
 pub enum AppError {
     NotFound(String),
     BadRequest(String),
+    Unprocessable(String),
     Conflict { code: String, message: String },
     Internal(String),
 }
@@ -1370,6 +1563,9 @@ impl AppError {
     }
     fn bad_request(msg: &str) -> Self {
         Self::BadRequest(msg.to_string())
+    }
+    fn unprocessable(msg: &str) -> Self {
+        Self::Unprocessable(msg.to_string())
     }
     fn conflict(code: &str, msg: &str) -> Self {
         Self::Conflict {
@@ -1387,6 +1583,7 @@ impl IntoResponse for AppError {
         let (status, msg) = match self {
             AppError::NotFound(id) => (StatusCode::NOT_FOUND, format!("entity not found: {id}")),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             AppError::Conflict { code, message } => {
                 return (
                     StatusCode::CONFLICT,
@@ -2650,5 +2847,158 @@ mod tests {
         };
         let resp = agent_context(State(state), Json(req)).await.unwrap().0;
         assert!(resp.context.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_weekly_report_aggregates_history_and_is_deterministic() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let db = state.db.lock().await;
+        db.upsert_entity(&sample_entity("know-up", "up.md", 80.0, "knowledge"), "up")
+            .unwrap();
+        db.upsert_entity(
+            &sample_entity("know-down", "down.md", 60.0, "knowledge"),
+            "down",
+        )
+        .unwrap();
+        db.insert_score_history(&crate::db::ScoreHistoryRow {
+            entity_id: "know-up".into(),
+            dimension: Some("manual".into()),
+            old: Some(10.0),
+            new: Some(15.0),
+            reason: None,
+            trigger: Some("ManualMark".into()),
+            created_at: "2026-07-06T01:00:00Z".into(),
+        })
+        .unwrap();
+        db.insert_score_history(&crate::db::ScoreHistoryRow {
+            entity_id: "know-up".into(),
+            dimension: Some("manual".into()),
+            old: Some(15.0),
+            new: Some(12.0),
+            reason: None,
+            trigger: Some("ManualMark".into()),
+            created_at: "2026-07-07T01:00:00Z".into(),
+        })
+        .unwrap();
+        db.insert_score_history(&crate::db::ScoreHistoryRow {
+            entity_id: "know-down".into(),
+            dimension: Some("interest".into()),
+            old: Some(50.0),
+            new: Some(40.0),
+            reason: None,
+            trigger: Some("Decay".into()),
+            created_at: "2026-07-08T01:00:00Z".into(),
+        })
+        .unwrap();
+        for (intensity, created_at) in [
+            (0.0, "2026-07-06T02:00:00Z"),
+            (1.0, "2026-07-06T03:00:00Z"),
+            (3.0, "2026-07-06T04:00:00Z"),
+            (5.0, "2026-07-06T05:00:00Z"),
+        ] {
+            db.insert_timeline(&crate::db::TimelineRow {
+                entity_id: "know-up".into(),
+                event_type: "access".into(),
+                intensity: Some(intensity),
+                source: Some("test".into()),
+                created_at: created_at.into(),
+            })
+            .unwrap();
+        }
+        db.insert_timeline(&crate::db::TimelineRow {
+            entity_id: "know-up".into(),
+            event_type: "create".into(),
+            intensity: None,
+            source: Some("test".into()),
+            created_at: "2026-07-06T06:00:00Z".into(),
+        })
+        .unwrap();
+        for (id, status) in [
+            ("s-accepted", "accepted"),
+            ("s-rejected", "rejected"),
+            ("s-expired", "expired"),
+        ] {
+            db.upsert_suggestion(&SuggestionRow {
+                suggestion_id: id.into(),
+                kind: "tag".into(),
+                entity_id: "know-up".into(),
+                candidate: id.into(),
+                candidate_key: id.into(),
+                confidence: Some(0.5),
+                reason: "test".into(),
+                source: "test".into(),
+                algorithm_version: "test-v1".into(),
+                content_hash: "a".repeat(64),
+                status: status.into(),
+                created_at: "2026-07-01T00:00:00Z".into(),
+                updated_at: "2026-07-09T01:00:00Z".into(),
+            })
+            .unwrap();
+        }
+        drop(db);
+
+        let query = WeeklyReportQuery {
+            from: Some("2026-07-06".into()),
+            to: Some("2026-07-13".into()),
+            tz: Some("Asia/Shanghai".into()),
+        };
+        let first = weekly_report(State(state.clone()), Query(query))
+            .await
+            .unwrap()
+            .0;
+        let second = weekly_report(
+            State(state),
+            Query(WeeklyReportQuery {
+                from: Some("2026-07-06".into()),
+                to: Some("2026-07-13".into()),
+                tz: Some("Asia/Shanghai".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(first, second);
+        assert_eq!(first.score_increases[0].entity_id, "know-up");
+        assert!((first.score_increases[0].delta - 2.0).abs() < 1e-9);
+        assert_eq!(first.score_decreases[0].entity_id, "know-down");
+        assert_eq!(first.access_count, 4);
+        assert_eq!(first.review_count, 2);
+        assert_eq!(first.access_stats.glance, 1);
+        assert_eq!(first.access_stats.read, 1);
+        assert_eq!(first.new_entities, vec!["know-up"]);
+        assert_eq!(first.suggestion_stats.accepted, 1);
+        assert_eq!(first.suggestion_stats.rejected, 1);
+        assert_eq!(first.suggestion_stats.expired, 1);
+        assert_eq!(first.generated_at, "2026-07-13T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn test_weekly_report_rejects_missing_or_invalid_timezone() {
+        let dir = tempdir().unwrap();
+        let state = setup_state(dir.path());
+        let error = weekly_report(
+            State(state.clone()),
+            Query(WeeklyReportQuery {
+                from: Some("2026-07-06".into()),
+                to: Some("2026-07-13".into()),
+                tz: Some("Not/AZone".into()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Unprocessable(_)));
+
+        let error = weekly_report(
+            State(state),
+            Query(WeeklyReportQuery {
+                from: Some("2026-07-06".into()),
+                to: Some("2026-07-13".into()),
+                tz: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Unprocessable(_)));
     }
 }

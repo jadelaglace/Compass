@@ -258,9 +258,19 @@ pub(crate) async fn process_single_file(
 
     let tags = frontmatter::extract_tags(&note.frontmatter);
     let links = frontmatter::extract_refs(&note.body);
-    db.lock()
-        .await
-        .upsert_entity_with_relationships(&entity, &note.body, &tags, &links)?;
+    let db_guard = db.lock().await;
+    let existed = db_guard.get_entity(&id)?.is_some();
+    db_guard.upsert_entity_with_relationships(&entity, &note.body, &tags, &links)?;
+    if !existed {
+        db_guard.insert_timeline(&crate::db::TimelineRow {
+            entity_id: id.clone(),
+            event_type: "create".to_string(),
+            intensity: None,
+            source: Some("watcher".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })?;
+    }
+    drop(db_guard);
 
     debug!(id = %id, composite = %score.composite, "entity upserted");
 
