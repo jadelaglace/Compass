@@ -65,6 +65,8 @@ pub struct RelatedSuggestion {
     pub score: f64,
     pub reasons: Vec<String>,
     pub content_hash: String,
+    pub source: String,
+    pub algorithm_version: String,
     pub status: SuggestionStatus,
 }
 
@@ -76,6 +78,17 @@ impl TagSuggestion {
         if !(0.0..=1.0).contains(&self.confidence) {
             return Err(anyhow!("confidence must be between 0 and 1"));
         }
+        validate_stable_id(
+            &self.suggestion_id,
+            stable_suggestion_id(
+                SuggestionKind::Tag,
+                &self.entity_id,
+                &self.tag,
+                &self.content_hash,
+                &self.algorithm_version,
+                &self.source,
+            ),
+        )?;
         Ok(())
     }
 }
@@ -83,8 +96,28 @@ impl TagSuggestion {
 impl RelatedSuggestion {
     pub fn validate(&self) -> Result<()> {
         validate_suggestion_id(&self.suggestion_id)?;
-        validate_content_hash(&self.content_hash)
+        validate_content_hash(&self.content_hash)?;
+        validate_stable_id(
+            &self.suggestion_id,
+            stable_suggestion_id(
+                SuggestionKind::Related,
+                "",
+                &self.id,
+                &self.content_hash,
+                &self.algorithm_version,
+                &self.source,
+            ),
+        )
     }
+}
+
+fn validate_stable_id(actual: &str, expected: String) -> Result<()> {
+    if actual != expected {
+        return Err(anyhow!(
+            "suggestion_id does not match stable identity; expected {expected}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,7 +171,7 @@ pub fn stable_suggestion_id(
         kind.as_str().to_string(),
         entity_id.to_string(),
         canonical_candidate(kind, candidate),
-        content_hash.to_string(),
+        content_hash.to_ascii_lowercase(),
         algorithm_version.to_string(),
         source.to_string(),
     ];
@@ -191,9 +224,13 @@ pub fn validate_content_hash(value: &str) -> Result<()> {
 }
 
 fn validate_hex_digest(value: &str, field: &str) -> Result<()> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(anyhow!(
-            "{field} must contain 64 lowercase/uppercase hex characters"
+            "{field} must contain 64 lowercase hexadecimal characters"
         ));
     }
     Ok(())

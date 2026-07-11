@@ -1,10 +1,12 @@
 {
-  "suggestion_id": "sug-1111111111111111111111111111111111111111111111111111111111111111",
+  "suggestion_id": "sug-216440bedced4a38367462fcddd049a45c01de6c869fae2adce2e0a6252f4236",
   "id": "know-000002",
   "title": "Related Note",
   "composite": 72.5,
   "score": 0.62,
   "reasons": ["shared term: decision", "shared tag: rust"],
   "content_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "source": "rust_lexical",
+  "algorithm_version": "related-v1",
   "status": "pending"
 }
