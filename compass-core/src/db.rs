@@ -206,6 +206,33 @@ impl Db {
         links: &[String],
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        let previous_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM entities WHERE file_path = ?1",
+                params![e.file_path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(previous_id) = previous_id.filter(|id| id != &e.id) {
+            let previous_rowid: i64 = tx.query_row(
+                "SELECT rowid FROM entities WHERE id = ?1",
+                params![previous_id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "DELETE FROM entities_fts WHERE rowid = ?1",
+                params![previous_rowid],
+            )?;
+            tx.execute(
+                "DELETE FROM entity_tags WHERE entity_id = ?1",
+                params![previous_id],
+            )?;
+            tx.execute(
+                "DELETE FROM entity_links WHERE source_id = ?1",
+                params![previous_id],
+            )?;
+            tx.execute("DELETE FROM entities WHERE id = ?1", params![previous_id])?;
+        }
         tx.execute(
             "INSERT INTO entities
                (id, file_path, title, layer, status, interest, strategy, consensus,
@@ -295,16 +322,31 @@ impl Db {
 
     pub fn delete_entities_under_path(&self, path: &str) -> Result<()> {
         let prefix = path.trim_end_matches('/');
-        let like = format!("{prefix}/%");
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM entities WHERE file_path = ?1 OR file_path LIKE ?2")?;
-        let ids = stmt
-            .query_map(params![prefix, like], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for id in ids {
-            self.delete_entity(&id)?;
+        let path_prefix = format!("{prefix}/");
+        let entities = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, rowid, file_path FROM entities")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        for (id, rowid, _) in entities
+            .into_iter()
+            .filter(|(_, _, file_path)| file_path == prefix || file_path.starts_with(&path_prefix))
+        {
+            tx.execute("DELETE FROM entities_fts WHERE rowid = ?1", params![rowid])?;
+            tx.execute("DELETE FROM entity_tags WHERE entity_id = ?1", params![id])?;
+            tx.execute("DELETE FROM entity_links WHERE source_id = ?1", params![id])?;
+            tx.execute("DELETE FROM entities WHERE id = ?1", params![id])?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -833,6 +875,21 @@ mod tests {
 
         db.delete_entity("know-1").unwrap();
         assert!(db.entity_tags("know-1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_literal_directory_prefix_does_not_use_sql_wildcards() {
+        let db = Db::open_in_memory().unwrap();
+        let mut literal = sample_row("know-literal");
+        literal.file_path = "folder%/note.md".to_string();
+        let mut other = sample_row("know-other");
+        other.file_path = "folderX/note.md".to_string();
+        db.upsert_entity(&literal, "body").unwrap();
+        db.upsert_entity(&other, "body").unwrap();
+
+        db.delete_entities_under_path("folder%").unwrap();
+        assert!(db.get_entity("know-literal").unwrap().is_none());
+        assert!(db.get_entity("know-other").unwrap().is_some());
     }
 
     #[test]

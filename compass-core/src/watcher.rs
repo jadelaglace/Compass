@@ -557,18 +557,20 @@ mod tests {
         );
 
         let second = first
+            .replace("id: know-000001", "id: know-000009")
             .replace("  - Rust\n  - '#rust'", "  - SQLite")
             .replace("[[know-000002]]", "[[know-000003]]");
         fs::write(&path, second).unwrap();
         process_single_file(&vault, &db, &weights, &path)
             .await
             .unwrap();
+        assert!(db.lock().await.get_entity("know-000001").unwrap().is_none());
         assert_eq!(
-            db.lock().await.entity_tags("know-000001").unwrap(),
+            db.lock().await.entity_tags("know-000009").unwrap(),
             vec!["SQLite"]
         );
         assert_eq!(
-            db.lock().await.entity_links("know-000001").unwrap(),
+            db.lock().await.entity_links("know-000009").unwrap(),
             vec!["know-000003"]
         );
     }
