@@ -713,12 +713,12 @@ pub fn router_from_config(cfg: Arc<Config>, db: Arc<Mutex<Db>>) -> Router {
 
 pub fn apply_security(router: Router, cfg: &Config) -> Router {
     router
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(
-            cfg.request_body_limit_bytes,
-        ))
         .layer(middleware::from_fn_with_state(
             cfg.auth_token.clone(),
             require_auth,
+        ))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            cfg.request_body_limit_bytes,
         ))
 }
 
@@ -891,7 +891,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_request_body_limit() {
         let dir = tempdir().unwrap();
-        let cfg = Arc::new(test_config(dir.path(), None, 64));
+        let cfg = Arc::new(test_config(dir.path(), Some("test-secret"), 64));
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
         let app = apply_security(router_from_config(cfg.clone(), db), &cfg);
         let body =
@@ -903,6 +903,7 @@ mod tests {
                     .method("POST")
                     .uri("/entities")
                     .header("content-type", "application/json")
+                    .header("content-length", body.len())
                     .body(Body::from(body))
                     .unwrap(),
             )
