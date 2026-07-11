@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::Config::load()?;
-    let addr = format!("{}:{}", cfg.bind, cfg.port);
+    let addr = config::format_bind_address(&cfg.bind, cfg.port);
     info!(vault = %cfg.vault_path.display(), bind = %cfg.bind, port = cfg.port, "Compass starting");
 
     // 初始化 DB
@@ -66,8 +66,12 @@ async fn main() -> anyhow::Result<()> {
     // 启动 HTTP API
     // 接线静态文件 + 根路由
     let web_dir = std::path::Path::new("web");
-    let app = api::router_from_config(Arc::new(cfg), db)
-        .fallback_service(tower_http::services::ServeDir::new(web_dir));
+    let cfg = Arc::new(cfg);
+    let app = api::apply_security(
+        api::router_from_config(Arc::clone(&cfg), db)
+            .fallback_service(tower_http::services::ServeDir::new(web_dir)),
+        &cfg,
+    );
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(%addr, "listening");
     axum::serve(listener, app).await?;

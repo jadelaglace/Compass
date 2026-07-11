@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header::AUTHORIZATION, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -709,7 +709,13 @@ pub fn router_from_config(cfg: Arc<Config>, db: Arc<Mutex<Db>>) -> Router {
         weights: cfg.weights,
     };
     router(state)
-        .layer(DefaultBodyLimit::max(cfg.request_body_limit_bytes))
+}
+
+pub fn apply_security(router: Router, cfg: &Config) -> Router {
+    router
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            cfg.request_body_limit_bytes,
+        ))
         .layer(middleware::from_fn_with_state(
             cfg.auth_token.clone(),
             require_auth,
@@ -809,9 +815,16 @@ mod tests {
     #[tokio::test]
     async fn test_http_authentication_middleware() {
         let dir = tempdir().unwrap();
+        let web_dir = dir.path().join("web");
+        fs::create_dir_all(&web_dir).unwrap();
+        fs::write(web_dir.join("index.html"), "private static content").unwrap();
         let cfg = Arc::new(test_config(dir.path(), Some("test-secret"), 1024));
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let app = router_from_config(cfg, db);
+        let app = apply_security(
+            router_from_config(Arc::clone(&cfg), db)
+                .fallback_service(tower_http::services::ServeDir::new(web_dir)),
+            &cfg,
+        );
 
         let response = app
             .clone()
@@ -824,6 +837,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/index.html")
+                    .header("authorization", "Bearer test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
 
         let response = app
             .oneshot(
@@ -843,7 +893,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = Arc::new(test_config(dir.path(), None, 64));
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let app = router_from_config(cfg, db);
+        let app = apply_security(router_from_config(cfg.clone(), db), &cfg);
         let body =
             r#"{"title":"a note whose request is intentionally too large","content":"body"}"#;
 

@@ -151,11 +151,27 @@ impl Config {
 }
 
 fn is_local_bind(bind: &str) -> bool {
+    let bind = bind
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(bind);
     bind.eq_ignore_ascii_case("localhost")
         || bind
             .parse::<std::net::IpAddr>()
             .map(|addr| addr.is_loopback())
             .unwrap_or(false)
+}
+
+pub(crate) fn format_bind_address(bind: &str, port: u16) -> String {
+    let host = bind
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(bind);
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 #[cfg(test)]
@@ -181,12 +197,27 @@ mod tests {
         assert_eq!(default_bind(), "127.0.0.1");
         assert!(is_local_bind("127.0.0.1"));
         assert!(is_local_bind("::1"));
+        assert!(is_local_bind("[::1]"));
         assert!(is_local_bind("localhost"));
         assert!(!is_local_bind("0.0.0.0"));
         assert_eq!(default_request_body_limit_bytes(), 1024 * 1024);
+        assert_eq!(format_bind_address("127.0.0.1", 8080), "127.0.0.1:8080");
+        assert_eq!(format_bind_address("::1", 8080), "[::1]:8080");
+        assert_eq!(format_bind_address("[::1]", 8080), "[::1]:8080");
         assert!(config("127.0.0.1", false)
             .validate_server_settings()
             .is_ok());
+    }
+
+    #[test]
+    fn legacy_config_gets_secure_server_defaults() {
+        let config: Config = toml::from_str("vault_path = \"vault\"").unwrap();
+
+        assert_eq!(config.bind, "127.0.0.1");
+        assert!(!config.allow_non_local);
+        assert!(config.auth_token.is_none());
+        assert_eq!(config.request_body_limit_bytes, 1024 * 1024);
+        assert!(config.validate_server_settings().is_ok());
     }
 
     #[test]
