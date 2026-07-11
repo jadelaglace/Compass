@@ -882,21 +882,33 @@ mod tests {
     }
 
     #[test]
-    fn test_rebuild_real_vault_sample() {
-        // 对仓库内真实 vault 样本验证：compass-v2.md 有 id+score 应被索引
-        let vault = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("vault");
-        let vault = vault.canonicalize().unwrap();
+    fn test_rebuild_vault_sample() {
+        // 使用固定 fixture，避免运行时评分改写跟踪 vault 后污染测试断言。
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(vault.join("Projects")).unwrap();
+        fs::write(
+            vault.join("Projects").join("compass-v2.md"),
+            "---\n\
+             id: proj-compass-v3\n\
+             title: Compass V3\n\
+             layer: direction\n\
+             status: active\n\
+             score:\n  interest: 9.5\n  strategy: 9.5\n  consensus: 7.0\n  composite: 8.9\n  updated_at: '2026-07-05T10:00:00+08:00'\n  last_boosted_at: '2026-07-05T10:00:00+08:00'\n  access_count: 1\n\
+             ---\n\
+             # Compass V3\n",
+        )
+        .unwrap();
         let db = Db::open_in_memory().unwrap();
         let stats = db.rebuild_from_vault(&vault).unwrap();
-        assert!(stats.indexed >= 1, "至少索引 compass-v2.md");
+        assert_eq!(stats.indexed, 1, "应索引 fixture compass-v2.md");
         let got = db.get_entity("proj-compass-v3").unwrap();
         assert!(
             got.is_some(),
-            "compass-v2.md 的 id=proj-compass-v3 应被索引"
+            "fixture compass-v2.md 的 id=proj-compass-v3 应被索引"
         );
         let got = got.unwrap();
+        assert_eq!(got.file_path, "Projects/compass-v2.md");
         assert!((got.composite.unwrap() - 8.9).abs() < 1e-9);
         assert_eq!(got.layer.as_deref(), Some("direction"));
     }
