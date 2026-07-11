@@ -13,7 +13,7 @@
 | 1 | 核心闭环 | 2-3 周 | ✅ 完成 | Obsidian 新建笔记→引擎算分写回 frontmatter→Dataview 排序可见 |
 | 2 | 浮现与可视化 | 2 周 | ✅ 完成 | `/feed` 浮现正确；Web 引力场节点大小=评分 |
 | 3 | Agent/Skill 对接 | 1-2 周 | ✅ 完成 | skill action→Compass API→vault；本地 E2E 覆盖 action + render + FileWatcher |
-| 4 | 智能增强 | 按需 | 准备完成 | 可解释标签建议/关联推荐/周报 |
+| 4 | 智能增强 | 按需 | ✅ 完成 | 可解释标签建议/关联推荐/周报 |
 | 5 | 打磨 | 按需 | 待开发 | Dataview 模板库 + Git 备份 + 跨端同步 |
 
 **总周期：5-8 周。**
@@ -78,7 +78,7 @@
 
 ---
 
-## 4. Phase 4 · 智能增强（T4.0-T4.5 已完成）
+## 4. Phase 4 · 智能增强（T4.0-T4.7 已完成）
 
 Phase 4 的实施入口是 [`docs/PHASE4_PREP.md`](PHASE4_PREP.md)。先冻结协议和责任边界，再进入运行时开发：
 
@@ -111,6 +111,6 @@ Phase 1、Phase 2、Phase 3 已完成。Phase 3 的本地验收从 `skills/compa
 
 `skill action → Rust HTTP API → frontmatter/SQLite → FileWatcher → skill render`
 
-证据：`skills/compass/test_e2e.py`（15 个 E2E）和 `skills/compass/test_compass.py`（21 个 renderer 单测）。
+证据：`cargo test --release`（149 个 Rust 测试）、`skills/compass/test_e2e.py`（17 个 HTTP/skill E2E）和 `skills/compass/test_compass.py`（21 个 renderer 单测）。完整验收见 [`docs/PHASE1_4_TEST_REPORT.md`](PHASE1_4_TEST_REPORT.md)。
 
 Phase 4 已完成 T4.0-T4.7。skill 已覆盖标签候选、关联推荐、accept/reject 与周报，并通过 action → Rust API → Vault/SQLite → render 的本地 E2E。

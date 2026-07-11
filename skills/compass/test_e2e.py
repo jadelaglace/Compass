@@ -18,6 +18,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 COMPASS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +63,34 @@ def compass_render_stdin(raw, action, env):
         env=env,
     )
     return result.stdout, result.stderr, result.returncode
+
+
+def http_json(base_url, path, method="GET", payload=None, timeout=5):
+    def decode(body):
+        if not body:
+            return None
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            return body
+
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url}{path}", data=data, method=method
+    )
+    request.add_header("Accept", "application/json")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+            return response.status, decode(body)
+    except urllib.error.HTTPError as error:
+        try:
+            body = error.read().decode("utf-8")
+            return error.code, decode(body)
+        finally:
+            error.close()
 
 
 class TestE2ESkillAgainstApi(unittest.TestCase):
@@ -356,6 +385,16 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertIn("建议已接受", rendered)
+        raw, err, rc = compass_cli(
+            "accept_tag", f"suggestion_id={accepted_id}", env=self.env
+        )
+        self.assertEqual(rc, 0, f"repeated tag accept failed: {err}")
+        self.assertEqual(json.loads(raw)["status"], "accepted")
+        _, err, rc = compass_cli(
+            "reject_tag", f"suggestion_id={accepted_id}", env=self.env
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("409", err)
         with open(tag_source_path, encoding="utf-8") as f:
             updated_note = f.read()
         self.assertIn("tags:", updated_note)
@@ -403,6 +442,16 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertIn("建议已接受", rendered)
+        raw, err, rc = compass_cli(
+            "accept_related", f"suggestion_id={target['suggestion_id']}", env=self.env
+        )
+        self.assertEqual(rc, 0, f"repeated related accept failed: {err}")
+        self.assertEqual(json.loads(raw)["status"], "accepted")
+        _, err, rc = compass_cli(
+            "reject_related", f"suggestion_id={target['suggestion_id']}", env=self.env
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("409", err)
         with open(source_path, encoding="utf-8") as f:
             self.assertIn("[[know-000001]]", f.read())
 
@@ -421,6 +470,152 @@ class TestE2ESkillAgainstApi(unittest.TestCase):
         )
         self.assertEqual(rc, 0, f"weekly render failed: {err}")
         self.assertIn("周报", rendered)
+
+    def test_phase4_http_contract_boundaries(self):
+        base_url = self.env["COMPASS_API_URL"]
+
+        status, _ = http_json(base_url, "/feed?mode=invalid")
+        self.assertEqual(status, 422)
+        status, _ = http_json(
+            base_url, "/agent/context", method="POST", payload={"task": ""}
+        )
+        self.assertEqual(status, 422)
+        status, _ = http_json(
+            base_url, "/agent/context", method="POST", payload={}
+        )
+        self.assertEqual(status, 422)
+
+        status, _ = http_json(
+            base_url,
+            "/entities/missing/tag-suggestions",
+            method="POST",
+            payload={},
+        )
+        self.assertEqual(status, 404)
+        status, _ = http_json(
+            base_url,
+            "/tag-suggestions/missing/accept",
+            method="POST",
+        )
+        self.assertEqual(status, 404)
+
+        status, lexical = http_json(
+            base_url,
+            "/entities/know-000001/tag-suggestions",
+            method="POST",
+            payload={},
+        )
+        self.assertEqual(status, 200)
+        candidate = {
+            "tag": "decision-science",
+            "confidence": 0.8,
+            "reason": "agent candidate",
+            "source": "agent",
+            "content_hash": lexical["content_hash"],
+        }
+        status, _ = http_json(
+            base_url,
+            "/entities/know-000001/tag-suggestions",
+            method="POST",
+            payload={"candidates": [candidate]},
+        )
+        self.assertEqual(status, 422)
+        candidate["algorithm_version"] = "agent-v1"
+        candidates = [
+            {**candidate, "tag": f"candidate-{index}"}
+            for index in range(21)
+        ]
+        status, _ = http_json(
+            base_url,
+            "/entities/know-000001/tag-suggestions",
+            method="POST",
+            payload={"candidates": candidates},
+        )
+        self.assertEqual(status, 422)
+
+        status, related = http_json(
+            base_url, "/entities/know-000001/related?limit=5"
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(related["suggestions"])
+        self.assertTrue(related["suggestions"][0]["reasons"])
+        self.assertNotIn(
+            "know-000001",
+            {item["id"] for item in related["suggestions"]},
+        )
+        status, _ = http_json(base_url, "/entities/missing/related")
+        self.assertEqual(status, 404)
+
+        valid_weekly = (
+            "/reports/weekly?from=2026-07-01&to=2026-07-12"
+            "&tz=Asia%2FShanghai"
+        )
+        status, first = http_json(base_url, valid_weekly)
+        self.assertEqual(status, 200)
+        status, second = http_json(base_url, valid_weekly)
+        self.assertEqual(status, 200)
+        self.assertEqual(first, second)
+        for query in (
+            "from=2026-07-01&to=2026-07-12",
+            "from=2026-07-01&to=2026-07-12&tz=Bogus%2FZone",
+            "from=notdate&to=2026-07-12&tz=Asia%2FShanghai",
+            "from=2026-07-12&to=2026-07-01&tz=Asia%2FShanghai",
+        ):
+            status, _ = http_json(base_url, f"/reports/weekly?{query}")
+            self.assertEqual(status, 422)
+
+    def test_runtime_stability_under_mixed_http_load(self):
+        raw, err, rc = compass_cli(
+            "create",
+            "title=Runtime Stability",
+            "layer=knowledge",
+            "content=中文评分引擎 mixed load regression",
+            env=self.env,
+        )
+        self.assertEqual(rc, 0, f"create failed: {err}")
+        entity = json.loads(raw)
+        self.created_files.append(os.path.join(self.vault, entity["file_path"]))
+        base_url = self.env["COMPASS_API_URL"]
+
+        # More than 40 mixed TCP requests, including successful writes and
+        # intentionally rejected requests, exceed the original failure report
+        # while keeping the regular E2E suite practical on Windows.
+        for iteration in range(10):
+            status, health = http_json(base_url, "/health")
+            self.assertEqual((status, health["status"]), (200, "ok"))
+
+            status, results = http_json(
+                base_url,
+                "/search?q=" + urllib.parse.quote("评分"),
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(any(item["id"] == entity["id"] for item in results))
+
+            status, _ = http_json(base_url, "/feed?mode=explore&limit=5")
+            self.assertEqual(status, 200)
+
+            status, _ = http_json(
+                base_url,
+                "/agent/context",
+                method="POST",
+                payload={"task": "mixed load", "top_k": 3},
+            )
+            self.assertEqual(status, 200)
+
+            if iteration % 5 == 0:
+                status, _ = http_json(base_url, "/feed?mode=invalid")
+                self.assertEqual(status, 422)
+                status, _ = http_json(
+                    base_url,
+                    f"/entities/{entity['id']}/access",
+                    method="PATCH",
+                    payload={"depth": "read"},
+                )
+                self.assertEqual(status, 200)
+
+        self.assertIsNone(self.server_proc.poll(), "Compass exited during mixed load")
+        status, health = http_json(base_url, "/health")
+        self.assertEqual((status, health["status"]), (200, "ok"))
 
     def test_create_and_score_and_access(self):
         # create
