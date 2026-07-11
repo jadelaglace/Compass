@@ -318,6 +318,134 @@ mod tests {
         .is_normalized());
     }
 
+    // ---- TC-D02: 知识时效边界（T4.9） ----
+
+    #[test]
+    fn decay_reaches_floor_after_many_half_lives() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Decay,
+            half_life_days: Some(30.0),
+            floor: Some(0.4),
+            valid_until: None,
+        };
+        let score = effective_score(
+            100.0,
+            &freshness,
+            Some(now - chrono::Duration::days(3650)),
+            now,
+        )
+        .unwrap();
+        // 10 年后应极接近 floor（允许浮点噪声）。
+        assert!(score.freshness_factor >= 0.4);
+        assert!(score.freshness_factor <= 0.4001);
+        assert!(score.effective_composite >= 40.0);
+        assert!(score.effective_composite <= 40.01);
+    }
+
+    #[test]
+    fn decay_defaults_to_floor_04_and_half_life_90() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Decay,
+            half_life_days: None,
+            floor: None,
+            valid_until: None,
+        };
+        // 90 天后正好一个半衰期：factor = 0.4 + 0.6 * 0.5 = 0.7
+        let score = effective_score(
+            100.0,
+            &freshness,
+            Some(now - chrono::Duration::days(90)),
+            now,
+        )
+        .unwrap();
+        assert!((score.freshness_factor - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decay_requires_content_updated_at() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Decay,
+            half_life_days: Some(30.0),
+            floor: Some(0.4),
+            valid_until: None,
+        };
+        assert!(effective_score(100.0, &freshness, None, now).is_err());
+    }
+
+    #[test]
+    fn decay_rejects_non_positive_half_life() {
+        let now = Utc::now();
+        for half_life in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let freshness = Freshness {
+                mode: FreshnessMode::Decay,
+                half_life_days: Some(half_life),
+                floor: Some(0.4),
+                valid_until: None,
+            };
+            assert!(
+                effective_score(100.0, &freshness, Some(now), now).is_err(),
+                "half_life {half_life} 应被拒绝"
+            );
+        }
+    }
+
+    #[test]
+    fn expires_is_full_score_before_valid_until() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Expires,
+            half_life_days: None,
+            floor: Some(0.2),
+            valid_until: Some((now + chrono::Duration::days(1)).to_rfc3339()),
+        };
+        let score = effective_score(80.0, &freshness, None, now).unwrap();
+        assert_eq!(score.freshness_factor, 1.0);
+        assert_eq!(score.effective_composite, 80.0);
+    }
+
+    #[test]
+    fn expires_applies_floor_after_valid_until() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Expires,
+            half_life_days: None,
+            floor: Some(0.2),
+            valid_until: Some((now - chrono::Duration::days(1)).to_rfc3339()),
+        };
+        let score = effective_score(80.0, &freshness, None, now).unwrap();
+        assert!((score.freshness_factor - 0.2).abs() < 1e-9);
+        assert!((score.effective_composite - 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn expires_defaults_floor_to_zero() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Expires,
+            half_life_days: None,
+            floor: None,
+            valid_until: Some((now - chrono::Duration::days(1)).to_rfc3339()),
+        };
+        let score = effective_score(80.0, &freshness, None, now).unwrap();
+        assert_eq!(score.freshness_factor, 0.0);
+        assert_eq!(score.effective_composite, 0.0);
+    }
+
+    #[test]
+    fn expires_requires_valid_until() {
+        let now = Utc::now();
+        let freshness = Freshness {
+            mode: FreshnessMode::Expires,
+            half_life_days: None,
+            floor: Some(0.2),
+            valid_until: None,
+        };
+        assert!(effective_score(80.0, &freshness, None, now).is_err());
+    }
+
     // ---- T1.3 触发器 deltas / 冷却 ----
 
     #[test]

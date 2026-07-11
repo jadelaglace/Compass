@@ -1888,6 +1888,58 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// TC-W01: 冻结的 Web 入口点和 /graph 保持可达。
+    #[tokio::test]
+    async fn test_frozen_web_entrypoint_and_graph_remain_reachable() {
+        let dir = tempdir().unwrap();
+        let web_dir = dir.path().join("web");
+        fs::create_dir_all(&web_dir).unwrap();
+        fs::write(web_dir.join("index.html"), "compass web").unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(
+            vault.join("know-a.md"),
+            sample_md("know-a", "A", 80.0, "body"),
+        )
+        .unwrap();
+        let cfg = Arc::new(test_config(dir.path(), None, 1024));
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        db.lock()
+            .await
+            .upsert_entity(
+                &sample_entity("know-a", "know-a.md", 80.0, "knowledge"),
+                "body",
+            )
+            .unwrap();
+        let app = router_from_config(Arc::clone(&cfg), db)
+            .fallback_service(tower_http::services::ServeDir::new(&web_dir));
+
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(data.get("nodes").is_some());
+        assert!(data.get("edges").is_some());
+    }
+
     #[tokio::test]
     async fn test_http_request_body_limit() {
         let dir = tempdir().unwrap();
@@ -3148,5 +3200,92 @@ mod tests {
         assert!(response[0].freshness_factor.unwrap() < 1.0);
         assert!(response[0].composite.unwrap() < 80.0);
         assert_eq!(fs::read_to_string(path).unwrap(), content);
+    }
+
+    /// TC-D03: 时间推移本身不会写回 Vault；所有读取端点共享同一不变量。
+    #[tokio::test]
+    async fn read_endpoints_do_not_mutate_vault_when_freshness_changes() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let state = setup_state(&vault);
+        let path = vault.join("old.md");
+        let content = "---\nid: know-old\ntitle: Old\nlayer: knowledge\nfreshness:\n  mode: decay\n  half_life_days: 30\n  floor: 0.4\ncontent_updated_at: '2026-01-01T00:00:00Z'\nscore:\n  interest: 80.0\n  strategy: 80.0\n  consensus: 80.0\n  composite: 80.0\n  updated_at: '2026-01-01T00:00:00Z'\n  last_boosted_at: '2026-01-01T00:00:00Z'\n  access_count: 0\n---\nold body\n";
+        fs::write(&path, content).unwrap();
+        state
+            .db
+            .lock()
+            .await
+            .upsert_entity(
+                &EntityRow {
+                    id: "know-old".to_string(),
+                    file_path: "old.md".to_string(),
+                    title: Some("Old".to_string()),
+                    layer: Some("knowledge".to_string()),
+                    status: Some("active".to_string()),
+                    interest: Some(80.0),
+                    strategy: Some(80.0),
+                    consensus: Some(80.0),
+                    composite: Some(80.0),
+                    access_count: 0,
+                    last_boosted_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    content_hash: Some("h".to_string()),
+                    updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+                },
+                "old body",
+            )
+            .unwrap();
+
+        let _ = feed(
+            State(state.clone()),
+            Query(FeedQuery {
+                mode: "explore".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = entities_top(
+            State(state.clone()),
+            Query(TopQuery {
+                layer: None,
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = get_entity(State(state.clone()), Path("know-old".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = search(
+            State(state.clone()),
+            Query(SearchQuery {
+                q: "old".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = graph(State(state.clone())).await.unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = agent_context(
+            State(state.clone()),
+            Json(AgentContextRequest {
+                task: "old body".to_string(),
+                top_k: 5,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
     }
 }

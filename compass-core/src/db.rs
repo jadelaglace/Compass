@@ -1794,4 +1794,80 @@ mod tests {
         // 引号被剥离，避免注入 FTS 语法
         assert_eq!(fts_query("\"inject"), "\"inject\"");
     }
+
+    /// TC-V03: Vault 是权威；即使 SQLite 索引暂时不一致，rebuild 也能从 Vault 恢复。
+    #[test]
+    fn rebuild_restores_index_from_authoritative_vault() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        let empty_vault = dir.path().join("empty");
+        fs::create_dir_all(&vault).unwrap();
+        fs::create_dir_all(&empty_vault).unwrap();
+        let original = md_with_id("know-recover", "Recover", "original body");
+        let path = vault.join("know-recover.md");
+        fs::write(&path, &original).unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        db.rebuild_from_vault(&vault).unwrap();
+        assert!(db.get_entity("know-recover").unwrap().is_some());
+
+        // 模拟 SQLite 索引丢失：rebuild 一个空 vault 会清空 entities/fts
+        db.rebuild_from_vault(&empty_vault).unwrap();
+        assert!(db.get_entity("know-recover").unwrap().is_none());
+
+        // Vault 内容不变，rebuild 恢复索引
+        db.rebuild_from_vault(&vault).unwrap();
+        let recovered = db.get_entity("know-recover").unwrap().unwrap();
+        assert_eq!(recovered.title.as_deref(), Some("Recover"));
+        assert!((recovered.composite.unwrap() - 85.3).abs() < 1e-9);
+    }
+
+    /// TC-A04: rebuild 与 watcher 对同一份笔记产生相同的索引投影。
+    /// 使用无 outgoing refs 的笔记，避免 watcher 触发 Linked/Cited 副作用。
+    #[tokio::test]
+    async fn rebuild_and_watcher_share_the_same_parse_projection_path() {
+        use std::sync::Arc;
+        use tempfile::tempdir;
+        use tokio::sync::Mutex;
+
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let note = "---\nid: know-shared\ntitle: Shared Parse\nlayer: knowledge\nstatus: active\ntags:\n  - Rust\nscore:\n  interest: 85.0\n  strategy: 90.0\n  consensus: 80.0\n  composite: 85.5\n  updated_at: '2026-07-06T00:00:00Z'\n  last_boosted_at: '2026-07-06T00:00:00Z'\n  access_count: 5\n---\nBody with no refs.\n";
+        let path = vault.join("know-shared.md");
+        fs::write(&path, note).unwrap();
+
+        // 路径 1：rebuild_from_vault
+        let db_rebuild = Db::open_in_memory().unwrap();
+        db_rebuild.rebuild_from_vault(&vault).unwrap();
+        let rebuilt = db_rebuild.get_entity("know-shared").unwrap().unwrap();
+
+        // 路径 2：watcher process_single_file
+        let db_watcher = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let weights = crate::models::Weights::default();
+        crate::watcher::process_single_file(&vault, &db_watcher, &weights, &path)
+            .await
+            .unwrap();
+        let watched = db_watcher
+            .lock()
+            .await
+            .get_entity("know-shared")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(rebuilt.id, watched.id);
+        assert_eq!(rebuilt.file_path, watched.file_path);
+        assert_eq!(rebuilt.title, watched.title);
+        assert_eq!(rebuilt.layer, watched.layer);
+        assert_eq!(rebuilt.status, watched.status);
+        assert!((rebuilt.interest.unwrap() - watched.interest.unwrap()).abs() < 1e-9);
+        assert!((rebuilt.strategy.unwrap() - watched.strategy.unwrap()).abs() < 1e-9);
+        assert!((rebuilt.consensus.unwrap() - watched.consensus.unwrap()).abs() < 1e-9);
+        assert!((rebuilt.composite.unwrap() - watched.composite.unwrap()).abs() < 1e-9);
+        assert_eq!(rebuilt.access_count, watched.access_count);
+        assert_eq!(
+            db_rebuild.entity_tags("know-shared").unwrap(),
+            db_watcher.lock().await.entity_tags("know-shared").unwrap()
+        );
+    }
 }

@@ -201,4 +201,20 @@ mod tests {
         config.auth_token = Some(String::new());
         assert!(config.validate_server_settings().is_err());
     }
+
+    /// TC-H01: Bearer token 不能绕过非本地绑定限制。
+    #[test]
+    fn non_local_bind_requires_explicit_opt_in_even_with_auth_token() {
+        let mut cfg = config("0.0.0.0", false);
+        cfg.auth_token = Some("secret".to_string());
+        let error = cfg.validate_server_settings().unwrap_err().to_string();
+        assert!(error.contains("allow_non_local"));
+    }
+
+    /// TC-H01: 显式允许后非本地绑定通过校验。
+    #[test]
+    fn explicit_non_local_opt_in_is_accepted() {
+        let cfg = config("0.0.0.0", true);
+        assert!(cfg.validate_server_settings().is_ok());
+    }
 }
