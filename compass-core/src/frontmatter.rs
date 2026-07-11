@@ -158,7 +158,12 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 pub fn extract_refs(body: &str) -> Vec<String> {
     let re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
     re.captures_iter(body)
-        .map(|c| c.get(1).unwrap().as_str().to_string())
+        .filter_map(|c| {
+            let raw = c.get(1).unwrap().as_str();
+            let target = raw.split('|').next().unwrap_or(raw);
+            let target = target.split('#').next().unwrap_or(target).trim();
+            (!target.is_empty()).then(|| target.to_string())
+        })
         .collect()
 }
 
@@ -350,5 +355,13 @@ mod tests {
         let tags = extract_tags("tags:\n  - Rust\n  - '#rust'\n  - sqlite\n");
         assert_eq!(tags, vec!["Rust", "sqlite"]);
         assert_eq!(extract_tags("tags: knowledge\n"), vec!["knowledge"]);
+    }
+
+    #[test]
+    fn test_extract_refs_normalizes_aliases_and_headings() {
+        assert_eq!(
+            extract_refs("[[know-1|Display]] [[know-2#Heading]] [[know-3]]"),
+            vec!["know-1", "know-2", "know-3"]
+        );
     }
 }

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
@@ -93,7 +93,10 @@ impl FileWatcher {
 
                         // 去抖：收集事件，延迟处理
                         for path in &event.paths {
-                            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                            if path.extension().and_then(|e| e.to_str()) == Some("md")
+                                || (matches!(&event.kind, EventKind::Remove(_))
+                                    && !path.exists())
+                            {
                                 last_events.insert(path.clone());
                             }
                         }
@@ -151,9 +154,15 @@ pub(crate) async fn process_single_file(
 ) -> Result<()> {
     // 文件不存在则删除索引
     if !path.exists() {
-        if let Some(id) = extract_id_from_path(vault, path) {
-            info!(id = %id, path = %path.display(), "deleting entity");
-            db.lock().await.delete_entity(&id)?;
+        let relative = rel_path(vault, path);
+        let db = db.lock().await;
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if let Some(id) = db.entity_id_by_file_path(&relative)? {
+                info!(id = %id, path = %path.display(), "deleting entity");
+                db.delete_entity(&id)?;
+            }
+        } else {
+            db.delete_entities_under_path(&relative)?;
         }
         return Ok(());
     }
@@ -166,6 +175,11 @@ pub(crate) async fn process_single_file(
         Some(id) => id,
         None => {
             debug!(path = %path.display(), "no id, skipping");
+            let relative = rel_path(vault, path);
+            let db = db.lock().await;
+            if let Some(existing_id) = db.entity_id_by_file_path(&relative)? {
+                db.delete_entity(&existing_id)?;
+            }
             return Ok(());
         }
     };
@@ -248,12 +262,11 @@ pub(crate) async fn process_single_file(
         updated_at: Some(score.updated_at.clone()),
     };
 
-    db.lock().await.upsert_entity(&entity, &note.body)?;
     let tags = frontmatter::extract_tags(&note.frontmatter);
     let links = frontmatter::extract_refs(&note.body);
     db.lock()
         .await
-        .replace_entity_relationships(&id, &tags, &links)?;
+        .upsert_entity_with_relationships(&entity, &note.body, &tags, &links)?;
 
     debug!(id = %id, composite = %score.composite, "entity upserted");
 
@@ -376,19 +389,6 @@ fn score_history_row(
     }
 }
 
-/// 从路径提取 id（vault 相对路径的文件名）
-fn extract_id_from_path(vault: &Path, path: &Path) -> Option<String> {
-    let rel = path.strip_prefix(vault).ok()?;
-    let file_name = rel.file_stem()?.to_str()?;
-    // 文件名格式：id.md（如 know-000001.md）
-    let id = file_name.split('.').next()?;
-    if id.is_empty() {
-        None
-    } else {
-        Some(id.to_string())
-    }
-}
-
 /// 从 frontmatter 提取 id
 fn extract_id_from_frontmatter(frontmatter: &str) -> Option<String> {
     let fm: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
@@ -495,23 +495,6 @@ mod tests {
 
         let visible = vec![PathBuf::from("/vault/knowledge/test.md")];
         assert!(!is_hidden_path(&visible));
-    }
-
-    #[test]
-    fn test_extract_id_from_path() {
-        let vault = PathBuf::from("/vault");
-        let path = PathBuf::from("/vault/knowledge/know-000001.md");
-        assert_eq!(
-            extract_id_from_path(&vault, &path),
-            Some("know-000001".to_string())
-        );
-
-        // 无 id 的文件名
-        let path_no_id = PathBuf::from("/vault/inbox/temp.md");
-        assert_eq!(
-            extract_id_from_path(&vault, &path_no_id),
-            Some("temp".to_string())
-        );
     }
 
     #[test]
@@ -720,7 +703,7 @@ mod tests {
         // 先 upsert 一个实体
         let entity = EntityRow {
             id: "know-000003".to_string(),
-            file_path: "know-000003.md".to_string(),
+            file_path: "custom-name.md".to_string(),
             title: Some("Test".to_string()),
             layer: Some("knowledge".to_string()),
             status: Some("active".to_string()),
@@ -736,10 +719,11 @@ mod tests {
         db.lock().await.upsert_entity(&entity, "body").unwrap();
 
         // 删除文件（不存在）
-        let path = vault.join("know-000003.md");
+        let path = vault.join("custom-name.md");
         process_single_file(&vault, &db, &weights, &path)
             .await
             .unwrap();
+        assert!(db.lock().await.get_entity("know-000003").unwrap().is_none());
 
         // 验证实体已删除
         assert!(db.lock().await.get_entity("know-000003").unwrap().is_none());

@@ -198,6 +198,77 @@ impl Db {
         Ok(())
     }
 
+    pub fn upsert_entity_with_relationships(
+        &self,
+        e: &EntityRow,
+        fts_content: &str,
+        tags: &[String],
+        links: &[String],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO entities
+               (id, file_path, title, layer, status, interest, strategy, consensus,
+                composite, access_count, last_boosted_at, content_hash, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(id) DO UPDATE SET
+               file_path=excluded.file_path, title=excluded.title, layer=excluded.layer,
+               status=excluded.status, interest=excluded.interest, strategy=excluded.strategy,
+               consensus=excluded.consensus, composite=excluded.composite,
+               access_count=excluded.access_count, last_boosted_at=excluded.last_boosted_at,
+               content_hash=excluded.content_hash, updated_at=excluded.updated_at",
+            params![
+                e.id,
+                e.file_path,
+                e.title,
+                e.layer,
+                e.status,
+                e.interest,
+                e.strategy,
+                e.consensus,
+                e.composite,
+                e.access_count,
+                e.last_boosted_at,
+                e.content_hash,
+                e.updated_at,
+            ],
+        )?;
+        let rowid: i64 = tx.query_row(
+            "SELECT rowid FROM entities WHERE id = ?1",
+            params![e.id],
+            |row| row.get(0),
+        )?;
+        tx.execute("DELETE FROM entities_fts WHERE rowid = ?1", params![rowid])?;
+        tx.execute(
+            "INSERT INTO entities_fts (rowid, title, content) VALUES (?1, ?2, ?3)",
+            params![rowid, e.title.as_deref().unwrap_or(""), fts_content],
+        )?;
+        tx.execute(
+            "DELETE FROM entity_tags WHERE entity_id = ?1",
+            params![e.id],
+        )?;
+        tx.execute(
+            "DELETE FROM entity_links WHERE source_id = ?1",
+            params![e.id],
+        )?;
+        for tag in tags {
+            tx.execute(
+                "INSERT OR IGNORE INTO entity_tags (entity_id, tag, tag_key)
+                 VALUES (?1, ?2, ?3)",
+                params![e.id, tag, tag.to_lowercase()],
+            )?;
+        }
+        for target_id in links {
+            tx.execute(
+                "INSERT OR IGNORE INTO entity_links (source_id, target_id)
+                 VALUES (?1, ?2)",
+                params![e.id, target_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_entity(&self, id: &str) -> Result<Option<EntityRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, title, layer, status, interest, strategy, consensus,
@@ -209,6 +280,32 @@ impl Db {
             Some(r) => Ok(Some(row_to_entity(r)?)),
             None => Ok(None),
         }
+    }
+
+    pub fn entity_id_by_file_path(&self, file_path: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM entities WHERE file_path = ?1",
+                params![file_path],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn delete_entities_under_path(&self, path: &str) -> Result<()> {
+        let prefix = path.trim_end_matches('/');
+        let like = format!("{prefix}/%");
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM entities WHERE file_path = ?1 OR file_path LIKE ?2")?;
+        let ids = stmt
+            .query_map(params![prefix, like], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in ids {
+            self.delete_entity(&id)?;
+        }
+        Ok(())
     }
 
     /// 按 composite 降序返回（NULL 自然排最后）。
@@ -237,15 +334,13 @@ impl Db {
             tx.execute("DELETE FROM entities_fts WHERE rowid = ?1", params![rid])?;
         }
         tx.execute("DELETE FROM entity_tags WHERE entity_id = ?1", params![id])?;
-        tx.execute(
-            "DELETE FROM entity_links WHERE source_id = ?1 OR target_id = ?1",
-            params![id],
-        )?;
+        tx.execute("DELETE FROM entity_links WHERE source_id = ?1", params![id])?;
         tx.execute("DELETE FROM entities WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn replace_entity_relationships(
         &self,
         entity_id: &str,
@@ -393,15 +488,15 @@ impl Db {
                         stats.duplicates += 1;
                         continue;
                     }
-                    if let Err(e) = self.upsert_entity(&parsed.row, &parsed.body) {
+                    if let Err(e) = self.upsert_entity_with_relationships(
+                        &parsed.row,
+                        &parsed.body,
+                        &parsed.tags,
+                        &parsed.links,
+                    ) {
                         tracing::warn!(path = %path.display(), err = %e, "索引写入失败，跳过");
                         stats.skipped += 1;
                     } else {
-                        self.replace_entity_relationships(
-                            &parsed.row.id,
-                            &parsed.tags,
-                            &parsed.links,
-                        )?;
                         stats.indexed += 1;
                     }
                 }
@@ -722,6 +817,7 @@ mod tests {
             &["know-2".to_string(), "know-2".to_string()],
         )
         .unwrap();
+        db.upsert_entity(&sample_row("know-2"), "body").unwrap();
         assert_eq!(db.entity_tags("know-1").unwrap(), vec!["Rust", "SQLite"]);
         assert_eq!(db.entity_links("know-1").unwrap(), vec!["know-2"]);
 
@@ -729,6 +825,11 @@ mod tests {
             .unwrap();
         assert_eq!(db.entity_tags("know-1").unwrap(), vec!["New"]);
         assert!(db.entity_links("know-1").unwrap().is_empty());
+
+        db.replace_entity_relationships("know-1", &[], &["know-2".to_string()])
+            .unwrap();
+        db.delete_entity("know-2").unwrap();
+        assert_eq!(db.entity_links("know-1").unwrap(), vec!["know-2"]);
 
         db.delete_entity("know-1").unwrap();
         assert!(db.entity_tags("know-1").unwrap().is_empty());
