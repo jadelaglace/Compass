@@ -65,6 +65,12 @@ pub fn read_note(path: &Path) -> Result<Note> {
     Ok(Note { frontmatter, body })
 }
 
+/// Returns true when frontmatter still contains a Templater expression.
+/// These notes are source templates rather than indexable entities.
+pub fn has_unrendered_templater_marker(frontmatter: &str) -> bool {
+    frontmatter.contains("<%") || frontmatter.contains("%>")
+}
+
 /// Apply the selected metadata changes under the same advisory lock used by score writes.
 /// The expected hash is computed from the raw authoritative Markdown note, excluding only
 /// the top-level score block as defined by `sha256-note-v1`.
