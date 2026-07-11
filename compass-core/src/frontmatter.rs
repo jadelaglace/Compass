@@ -6,6 +6,7 @@
 //! 注：文件锁为 advisory（独立 .lock 文件），只防 compass 自身并发写，
 //! 不防 Obsidian 等外部编辑器直接改 .md（外部编辑 last-write-wins）。
 
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,12 +23,201 @@ pub struct Note {
     pub body: String,
 }
 
+/// Metadata changes that Phase 4 accept operations are allowed to apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataPatch {
+    AddTag(String),
+    AddLink(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataPatchResult {
+    pub changed: bool,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataPatchError {
+    Stale { expected: String, actual: String },
+}
+
+impl fmt::Display for MetadataPatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stale { expected, actual } => {
+                write!(
+                    f,
+                    "content hash is stale: expected {expected}, actual {actual}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MetadataPatchError {}
+
 /// 读取 .md 文件，拆分 frontmatter 与正文。
 pub fn read_note(path: &Path) -> Result<Note> {
     let content =
         fs::read_to_string(path).with_context(|| format!("读取文件失败 {}", path.display()))?;
     let (frontmatter, body) = split_frontmatter(&content)?;
     Ok(Note { frontmatter, body })
+}
+
+/// Apply the selected metadata changes under the same advisory lock used by score writes.
+/// The expected hash is computed from the raw authoritative Markdown note, excluding only
+/// the top-level score block as defined by `sha256-note-v1`.
+pub fn patch_metadata(
+    path: &Path,
+    expected_hash: &str,
+    patches: &[MetadataPatch],
+) -> Result<MetadataPatchResult> {
+    let lock_path = path.with_extension("md.lock");
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)
+        .with_context(|| format!("打开锁文件失败 {}", lock_path.display()))?;
+    lock_file.lock_exclusive().context("获取文件锁失败")?;
+
+    let result = (|| -> Result<MetadataPatchResult> {
+        let original = fs::read_to_string(path)?;
+        let actual_hash = crate::contracts::note_content_hash(&original)?;
+        if actual_hash != expected_hash {
+            return Err(MetadataPatchError::Stale {
+                expected: expected_hash.to_string(),
+                actual: actual_hash,
+            }
+            .into());
+        }
+
+        let newline = if original.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let has_bom = original.starts_with('\u{feff}');
+        let normalized = original
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&original)
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        let had_trailing_newline = normalized.ends_with('\n');
+        let (frontmatter, body) = split_frontmatter(&normalized)?;
+        let mut new_frontmatter = frontmatter.clone();
+        let mut new_body = body.clone();
+        let mut changed = false;
+
+        for patch in patches {
+            match patch {
+                MetadataPatch::AddTag(tag) => {
+                    let tag = crate::contracts::normalize_tag(tag)?;
+                    let existing = extract_tags(&new_frontmatter);
+                    if !existing
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(&tag))
+                    {
+                        new_frontmatter = add_tag(&new_frontmatter, &tag);
+                        changed = true;
+                    }
+                }
+                MetadataPatch::AddLink(target) => {
+                    let target = target.trim();
+                    if target.is_empty()
+                        || target.contains('\n')
+                        || target.contains('\r')
+                        || target.contains(']')
+                    {
+                        return Err(anyhow!("link target must be a non-empty single line"));
+                    }
+                    if !extract_refs(&new_body).iter().any(|value| value == target) {
+                        if !new_body.is_empty() {
+                            new_body.push_str("\n\n");
+                        }
+                        new_body.push_str("[[");
+                        new_body.push_str(target);
+                        new_body.push_str("]]\n");
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(MetadataPatchResult {
+                changed: false,
+                content_hash: actual_hash,
+            });
+        }
+
+        let mut new_content = format!("---\n{}\n---", new_frontmatter.trim_end_matches('\n'));
+        if !new_body.is_empty() {
+            new_content.push('\n');
+            new_content.push_str(&new_body);
+        }
+        if had_trailing_newline && !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        if has_bom {
+            new_content.insert(0, '\u{feff}');
+        }
+        let new_content = if newline == "\r\n" {
+            new_content.replace('\n', "\r\n")
+        } else {
+            new_content
+        };
+        atomic_write(path, &new_content)?;
+        let content_hash = crate::contracts::note_content_hash(&new_content)?;
+        Ok(MetadataPatchResult {
+            changed: true,
+            content_hash,
+        })
+    })();
+    let _ = lock_file.unlock();
+    result
+}
+
+fn add_tag(frontmatter: &str, tag: &str) -> String {
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut tags = extract_tags(frontmatter);
+    tags.push(tag.to_string());
+    let mut block = vec!["tags:".to_string()];
+    block.extend(tags.into_iter().map(|value| {
+        let serialized = serde_yaml::to_string(&value)
+            .unwrap_or_else(|_| format!("'{}'", value.replace('\'', "''")))
+            .trim()
+            .to_string();
+        format!("  - {serialized}")
+    }));
+    let start = lines.iter().position(|line| line.starts_with("tags:"));
+    let insert_at = start.or_else(|| lines.iter().position(|line| line.starts_with("score:")));
+
+    let mut output = Vec::new();
+    match insert_at {
+        Some(start_idx) if start.is_some() => {
+            let mut end_idx = lines.len();
+            for (idx, line) in lines.iter().enumerate().skip(start_idx + 1) {
+                if !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
+                    end_idx = idx;
+                    break;
+                }
+            }
+            output.extend(lines[..start_idx].iter().map(|line| (*line).to_string()));
+            output.extend(block);
+            output.extend(lines[end_idx..].iter().map(|line| (*line).to_string()));
+        }
+        Some(score_idx) => {
+            output.extend(lines[..score_idx].iter().map(|line| (*line).to_string()));
+            output.extend(block);
+            output.extend(lines[score_idx..].iter().map(|line| (*line).to_string()));
+        }
+        None => {
+            output.extend(lines.iter().map(|line| (*line).to_string()));
+            output.extend(block);
+        }
+    }
+    output.join("\n")
 }
 
 /// 拆分 `---\n<yaml>\n---\n<body>`。
@@ -363,5 +553,68 @@ mod tests {
             extract_refs("[[know-1|Display]] [[know-2#Heading]] [[know-3]]"),
             vec!["know-1", "know-2", "know-3"]
         );
+    }
+
+    #[test]
+    fn test_patch_metadata_preserves_bom_crlf_score_and_body() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        let original = format!("\u{feff}{}", sample_md().replace('\n', "\r\n"));
+        fs::write(&path, &original).unwrap();
+        let expected = crate::contracts::note_content_hash(&original).unwrap();
+
+        let result = patch_metadata(
+            &path,
+            &expected,
+            &[
+                MetadataPatch::AddTag("Rust".to_string()),
+                MetadataPatch::AddLink("know-000003".to_string()),
+            ],
+        )
+        .unwrap();
+        assert!(result.changed);
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with('\u{feff}'));
+        assert!(after.contains("\r\n"));
+        assert!(after.contains("  - math\r\n  - strategy\r\n  - Rust"));
+        assert!(after.contains("access_count: 0"));
+        assert!(after.contains("# Game Theory\r\n"));
+        assert!(after.ends_with("[[know-000003]]\r\n"));
+        assert_eq!(
+            crate::contracts::note_content_hash(&after).unwrap(),
+            result.content_hash
+        );
+    }
+
+    #[test]
+    fn test_patch_metadata_stale_does_not_modify_file_and_repeat_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, sample_md()).unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        let stale = "0".repeat(64);
+        let error = patch_metadata(&path, &stale, &[MetadataPatch::AddTag("Rust".to_string())])
+            .unwrap_err();
+        assert!(error.downcast_ref::<MetadataPatchError>().is_some());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+        let expected = crate::contracts::note_content_hash(&original).unwrap();
+        let first = patch_metadata(
+            &path,
+            &expected,
+            &[MetadataPatch::AddTag("Rust".to_string())],
+        )
+        .unwrap();
+        let after_first = fs::read_to_string(&path).unwrap();
+        let second = patch_metadata(
+            &path,
+            &first.content_hash,
+            &[MetadataPatch::AddTag("rust".to_string())],
+        )
+        .unwrap();
+        assert!(!second.changed);
+        assert_eq!(second.content_hash, first.content_hash);
+        assert_eq!(fs::read_to_string(&path).unwrap(), after_first);
     }
 }
