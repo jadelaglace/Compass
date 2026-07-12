@@ -1888,58 +1888,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// TC-W01: 冻结的 Web 入口点和 /graph 保持可达。
-    #[tokio::test]
-    async fn test_frozen_web_entrypoint_and_graph_remain_reachable() {
-        let dir = tempdir().unwrap();
-        let web_dir = dir.path().join("web");
-        fs::create_dir_all(&web_dir).unwrap();
-        fs::write(web_dir.join("index.html"), "compass web").unwrap();
-        let vault = dir.path().join("vault");
-        fs::create_dir_all(&vault).unwrap();
-        fs::write(
-            vault.join("know-a.md"),
-            sample_md("know-a", "A", 80.0, "body"),
-        )
-        .unwrap();
-        let cfg = Arc::new(test_config(dir.path(), None, 1024));
-        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        db.lock()
-            .await
-            .upsert_entity(
-                &sample_entity("know-a", "know-a.md", 80.0, "knowledge"),
-                "body",
-            )
-            .unwrap();
-        let app = router_from_config(Arc::clone(&cfg), db)
-            .fallback_service(tower_http::services::ServeDir::new(&web_dir));
-
-        let response = app
-            .clone()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/graph")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(data.get("nodes").is_some());
-        assert!(data.get("edges").is_some());
-    }
-
     #[tokio::test]
     async fn test_http_request_body_limit() {
         let dir = tempdir().unwrap();

@@ -14,9 +14,25 @@ mod models;
 mod scoring;
 mod watcher;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
+
+fn frozen_web_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compass-core manifest directory must have a workspace parent")
+        .join("web")
+}
+
+fn build_router(cfg: Arc<config::Config>, db: Arc<Mutex<db::Db>>) -> axum::Router {
+    api::apply_security(
+        api::router_from_config(Arc::clone(&cfg), db)
+            .fallback_service(tower_http::services::ServeDir::new(frozen_web_dir())),
+        &cfg,
+    )
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -57,16 +73,73 @@ async fn main() -> anyhow::Result<()> {
     info!("FileWatcher started");
 
     // 启动 HTTP API
-    // 接线静态文件 + 根路由
-    let web_dir = std::path::Path::new("web");
     let cfg = Arc::new(cfg);
-    let app = api::apply_security(
-        api::router_from_config(Arc::clone(&cfg), db)
-            .fallback_service(tower_http::services::ServeDir::new(web_dir)),
-        &cfg,
-    );
+    let app = build_router(cfg, db);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(%addr, "listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn production_router_serves_frozen_web_assets_and_graph() {
+        for asset in ["index.html", "style.css", "app.js"] {
+            assert!(
+                frozen_web_dir().join(asset).is_file(),
+                "frozen Web asset is missing: {asset}"
+            );
+        }
+
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let cfg = Arc::new(config::Config {
+            vault_path: vault,
+            bind: "127.0.0.1".to_string(),
+            port: 8080,
+            allow_non_local: false,
+            auth_token: None,
+            request_body_limit_bytes: 1024 * 1024,
+            db_path: None,
+            weights: models::Weights::default(),
+        });
+        let app = build_router(cfg, Arc::new(Mutex::new(db::Db::open_in_memory().unwrap())));
+
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let index = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(index.contains("href=\"style.css\""));
+        assert!(index.contains("src=\"app.js\""));
+
+        for path in ["/style.css", "/app.js", "/graph"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "expected {path} to remain reachable"
+            );
+        }
+    }
 }

@@ -1822,10 +1822,10 @@ mod tests {
         assert!((recovered.composite.unwrap() - 85.3).abs() < 1e-9);
     }
 
-    /// TC-A04: rebuild 与 watcher 对同一份笔记产生相同的索引投影。
+    /// TC-I02: rebuild 与 watcher 对同一份笔记产生等价的索引投影。
     /// 使用无 outgoing refs 的笔记，避免 watcher 触发 Linked/Cited 副作用。
     #[tokio::test]
-    async fn rebuild_and_watcher_share_the_same_parse_projection_path() {
+    async fn rebuild_and_watcher_produce_equivalent_index_projections() {
         use std::sync::Arc;
         use tempfile::tempdir;
         use tokio::sync::Mutex;
@@ -1855,16 +1855,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(rebuilt.id, watched.id);
-        assert_eq!(rebuilt.file_path, watched.file_path);
-        assert_eq!(rebuilt.title, watched.title);
-        assert_eq!(rebuilt.layer, watched.layer);
-        assert_eq!(rebuilt.status, watched.status);
-        assert!((rebuilt.interest.unwrap() - watched.interest.unwrap()).abs() < 1e-9);
-        assert!((rebuilt.strategy.unwrap() - watched.strategy.unwrap()).abs() < 1e-9);
-        assert!((rebuilt.consensus.unwrap() - watched.consensus.unwrap()).abs() < 1e-9);
-        assert!((rebuilt.composite.unwrap() - watched.composite.unwrap()).abs() < 1e-9);
-        assert_eq!(rebuilt.access_count, watched.access_count);
+        assert_eq!(rebuilt, watched);
         assert_eq!(
             db_rebuild.entity_tags("know-shared").unwrap(),
             db_watcher.lock().await.entity_tags("know-shared").unwrap()

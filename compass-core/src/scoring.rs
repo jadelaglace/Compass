@@ -221,6 +221,12 @@ mod tests {
         }
     }
 
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-12T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
     // ---- T1.1 综合分/衰减 ----
 
     #[test]
@@ -266,7 +272,7 @@ mod tests {
 
     #[test]
     fn effective_score_is_read_time_only_and_preserves_base_score() {
-        let now = Utc::now();
+        let now = fixed_now();
         let freshness = Freshness {
             mode: FreshnessMode::Decay,
             half_life_days: Some(30.0),
@@ -295,7 +301,7 @@ mod tests {
 
     #[test]
     fn evergreen_effective_score_never_decays() {
-        let now = Utc::now();
+        let now = fixed_now();
         let score = effective_score(
             80.0,
             &Freshness::default(),
@@ -322,7 +328,7 @@ mod tests {
 
     #[test]
     fn decay_reaches_floor_after_many_half_lives() {
-        let now = Utc::now();
+        let now = fixed_now();
         let freshness = Freshness {
             mode: FreshnessMode::Decay,
             half_life_days: Some(30.0),
@@ -345,7 +351,7 @@ mod tests {
 
     #[test]
     fn decay_defaults_to_floor_04_and_half_life_90() {
-        let now = Utc::now();
+        let now = fixed_now();
         let freshness = Freshness {
             mode: FreshnessMode::Decay,
             half_life_days: None,
@@ -365,7 +371,7 @@ mod tests {
 
     #[test]
     fn decay_requires_content_updated_at() {
-        let now = Utc::now();
+        let now = fixed_now();
         let freshness = Freshness {
             mode: FreshnessMode::Decay,
             half_life_days: Some(30.0),
@@ -377,7 +383,7 @@ mod tests {
 
     #[test]
     fn decay_rejects_non_positive_half_life() {
-        let now = Utc::now();
+        let now = fixed_now();
         for half_life in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             let freshness = Freshness {
                 mode: FreshnessMode::Decay,
@@ -394,7 +400,7 @@ mod tests {
 
     #[test]
     fn expires_is_full_score_before_valid_until() {
-        let now = Utc::now();
+        let now = fixed_now();
         let freshness = Freshness {
             mode: FreshnessMode::Expires,
             half_life_days: None,
@@ -408,7 +414,7 @@ mod tests {
 
     #[test]
     fn expires_applies_floor_after_valid_until() {
-        let now = Utc::now();
+        let now = fixed_now();
         let freshness = Freshness {
             mode: FreshnessMode::Expires,
             half_life_days: None,
@@ -422,7 +428,7 @@ mod tests {
 
     #[test]
     fn expires_defaults_floor_to_zero() {
-        let now = Utc::now();
+        let now = fixed_now();
         let freshness = Freshness {
             mode: FreshnessMode::Expires,
             half_life_days: None,
