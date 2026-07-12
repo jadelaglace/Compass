@@ -1,4 +1,6 @@
-# Compass Technical Design Document
+# Archived: Compass v2.1 Technical Design Document
+
+> **ARCHIVED - DO NOT IMPLEMENT FROM THIS DOCUMENT.** This v2.1 historical technical/task document contains superseded Python, FastAPI, FAISS, React, and Web UI plans. The active v3 document flow is `PRD_v3.0.md` -> `ARCHITECTURE.md` -> `TEST_CASES.md` -> `PLAN.md` -> `GITHUB_WORKFLOW.md`. TDD remains a test-development practice, not the architecture source of truth.
 
 | 字段 | 内容 |
 |------|------|

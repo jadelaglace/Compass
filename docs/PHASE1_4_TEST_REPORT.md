@@ -1,6 +1,6 @@
 # Compass Phase 1-4 测试报告
 
-> 日期：2026-07-11
+> 日期：2026-07-11（Phase 5 开始前基线复跑）
 > 范围：Phase 1-4 最终收尾
 > 环境：Windows 10 / Rust release / Python unittest
 > 原则：所有写入型黑盒测试均使用临时 Vault，不修改真实 Vault
@@ -13,12 +13,14 @@ Phase 1-4 验收通过，可以进入 Phase 5。
 
 | 验收层 | 结果 |
 |---|---|
-| Rust 单元与模块 E2E | 149 passed / 0 failed / 0 ignored |
+| Rust 单元与模块 E2E | 141 passed / 0 failed / 0 ignored |
 | Skill HTTP E2E | 17 passed / 0 failed |
-| Skill renderer | 21 passed / 0 failed |
+| Skill renderer | 23 passed / 0 failed |
 | Phase 4 HTTP 边界 | 通过 |
 | 混合 TCP 负载 | 通过，服务最终健康检查为 200 |
 | 真实 Vault 副作用 | 已清理 |
+
+本报告中的计数以本次基线复跑为准；历史提交中的计数不再作为当前验收口径。
 
 ## 1. 最终修复
 

@@ -3149,4 +3149,91 @@ mod tests {
         assert!(response[0].composite.unwrap() < 80.0);
         assert_eq!(fs::read_to_string(path).unwrap(), content);
     }
+
+    /// TC-D03: 时间推移本身不会写回 Vault；所有读取端点共享同一不变量。
+    #[tokio::test]
+    async fn read_endpoints_do_not_mutate_vault_when_freshness_changes() {
+        let dir = tempdir().unwrap();
+        let vault = dir.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let state = setup_state(&vault);
+        let path = vault.join("old.md");
+        let content = "---\nid: know-old\ntitle: Old\nlayer: knowledge\nfreshness:\n  mode: decay\n  half_life_days: 30\n  floor: 0.4\ncontent_updated_at: '2026-01-01T00:00:00Z'\nscore:\n  interest: 80.0\n  strategy: 80.0\n  consensus: 80.0\n  composite: 80.0\n  updated_at: '2026-01-01T00:00:00Z'\n  last_boosted_at: '2026-01-01T00:00:00Z'\n  access_count: 0\n---\nold body\n";
+        fs::write(&path, content).unwrap();
+        state
+            .db
+            .lock()
+            .await
+            .upsert_entity(
+                &EntityRow {
+                    id: "know-old".to_string(),
+                    file_path: "old.md".to_string(),
+                    title: Some("Old".to_string()),
+                    layer: Some("knowledge".to_string()),
+                    status: Some("active".to_string()),
+                    interest: Some(80.0),
+                    strategy: Some(80.0),
+                    consensus: Some(80.0),
+                    composite: Some(80.0),
+                    access_count: 0,
+                    last_boosted_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    content_hash: Some("h".to_string()),
+                    updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+                },
+                "old body",
+            )
+            .unwrap();
+
+        let _ = feed(
+            State(state.clone()),
+            Query(FeedQuery {
+                mode: "explore".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = entities_top(
+            State(state.clone()),
+            Query(TopQuery {
+                layer: None,
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = get_entity(State(state.clone()), Path("know-old".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = search(
+            State(state.clone()),
+            Query(SearchQuery {
+                q: "old".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = graph(State(state.clone())).await.unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+
+        let _ = agent_context(
+            State(state.clone()),
+            Json(AgentContextRequest {
+                task: "old body".to_string(),
+                top_k: 5,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+    }
 }
