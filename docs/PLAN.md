@@ -101,19 +101,22 @@ T4.9 取代历史的持久化 interest 衰减：`score` 中的三维基础分只
 
 ## 5. Phase 5 · 架构收敛与打磨
 
-| ID | 任务 | 依赖 | 验收 |
-|----|------|------|------|
-| P5.1 | 架构基线与行为刻画 | `ARCHITECTURE.md`、`TEST_CASES.md` | 当前 HTTP/Skill/Vault 契约有测试覆盖；不改变公开契约 |
-| P5.2 | Domain 与 HTTP DTO 分界 | P5.1 | Application/Domain 不依赖 Axum 或 SQL 行模型 |
-| P5.3 | Vault 适配层与索引服务 | P5.2 | `db.rs` 不再扫描目录或解析 Markdown；rebuild 与 watcher 共用索引路径 |
-| P5.4 | SQLite 仓储与锁范围收敛 | P5.3 | `EntityRow` 为基础设施私有；数据库锁不覆盖文件 I/O、排序或 `.await` |
-| P5.5 | 查询、实体、建议应用服务 | P5.4 | HTTP handler 仅做校验、调用与序列化 |
-| P5.6 | 架构收尾与回归验收 | P5.5 | Rust、HTTP/Skill E2E、rebuild 幂等回归通过；文档与实际结构一致 |
-| P5.7 | Dataview 查询模板库 | P5.6 | `docs/dataview-queries.md` 覆盖既定查询场景 |
-| P5.8 | Git 自动提交备份 | P5.7 | 每日 diff 可审计且不影响 Vault 权威性 |
-| P5.9 | 跨端同步（Syncthing/WebDAV） | P5.8 | 同步冲突与重建路径经过验证 |
+**预估合计：~49h。** 架构主线（P5.1–P5.6）与工具链（P5.7–P5.9）相互独立，可并行推进。
 
-> P5.1-P5.6 以 [`ARCHITECTURE.md`](ARCHITECTURE.md) 和 [`TEST_CASES.md`](TEST_CASES.md) 为设计、测试与验收基线；未经 PRD 更新不得改变公开 HTTP、Skill 或 Vault 契约。
+| ID | 任务 | 依赖 | 工时 | 验收 |
+|----|------|------|------|------|
+| P5.1 | ✅ 覆盖缺口审查与刻画测试（#234 / PR #235） | `ARCHITECTURE.md`、`TEST_CASES.md` | 4h | 已逐一核查 TC-D/TC-V/TC-I/TC-Q/TC-H/TC-K/TC-A；补齐可在当前架构稳定刻画的测试，既有回归全通，剩余缺口已明确归属后续步骤 |
+| P5.2 | Domain/DTO 分界与模块骨架 | P5.1 | 6h | 建立 `domain/`、`application/`、`infrastructure/`、`transport/` 子目录与 `mod.rs`；`pub(crate)` 可见性约束生效；Application/Domain 不导入 Axum 或 SQL 行类型 |
+| P5.3a | Vault 适配层隔离 | P5.2 | 6h | frontmatter 解析与原子写入封装在 `vault_adapter.rs`；其他层通过 port 调用；`db.rs` 不再解析 Markdown 或处理文件 I/O |
+| P5.3b | 索引服务提取 | P5.3a | 4h | `index_service.rs` 统一 rebuild 与 watcher 的解析→投影路径；watcher 不再直接操作 SQLite |
+| P5.4 | SQLite 仓储与锁范围收敛 | P5.3b | 6h | `EntityRow` 及 SQL 语句为 `sqlite_repository.rs` 私有；数据库锁不覆盖文件 I/O、排序或 `.await` |
+| P5.5 | 查询、实体、建议应用服务 | P5.4 | 8h | HTTP handler 仅做校验、调用与序列化；业务逻辑迁入应用服务层 |
+| P5.6 | 架构收尾与回归验收 | P5.5 | 4h | 删除废弃耦合；Rust、HTTP/Skill E2E、rebuild 幂等回归全通；文档与实际结构一致 |
+| P5.7 | Dataview 查询模板库 | —（独立） | 3h | `docs/dataview-queries.md` 覆盖既定查询场景；可与 P5.1–P5.6 并行 |
+| P5.8 | Git 自动提交备份 | —（独立） | 4h | 每日 diff 可审计且不影响 Vault 权威性；可与 P5.2+ 并行 |
+| P5.9 | 跨端同步（Syncthing/WebDAV） | P5.8 | 4h | 同步冲突与重建路径经过验证 |
+
+> P5.1–P5.6 以 [`ARCHITECTURE.md`](ARCHITECTURE.md) 和 [`TEST_CASES.md`](TEST_CASES.md) 为设计、测试与验收基线；未经 PRD 更新不得改变公开 HTTP、Skill 或 Vault 契约。
 
 > **Web UI 冻结策略：**保留现有 `web/` 静态页面、`/graph` API 和 Rust 静态服务，以维持已有访问方式；不删除、不新增功能、不进行 SPA 化或视觉重构。后续若重新投入，目标是将其剥离为可选的独立包/服务，而不是继续扩展 Compass 核心。
 
