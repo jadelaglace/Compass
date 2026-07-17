@@ -1,29 +1,38 @@
-//! SQLite 索引层（T1.4）：entities / score_history / timeline / entities_fts。
+//! SQLite �����㣨T1.4����entities / score_history / timeline / entities_fts��
 //!
-//! 设计（PRD_v3.0 §4.2）：
-//! - frontmatter 是权威，SQLite 仅作索引/缓存/历史，删库可从 vault 重建。
-//! - entities 表缓存三维评分（interest/strategy/consensus + composite），列表查询免读文件。
-//! - score_history 记评分变更历史（frontmatter 不存），并供 T1.3 冷却 per-type 查询
-//!   （`last_trigger_time` 按 `id DESC` 取最新——插入序即时间序，规避 RFC3339 时区排序问题）。
-//! - entities_fts 用普通 FTS5 内部表（title, content），rowid 绑定 entities 隐式 rowid，
-//!   支持 snippet；仅 Agent/Skill 用（Obsidian 用自身搜索）。
-//! - rebuild 不清空 score_history/timeline（历史日志保留；孤儿记录可接受，T1.4 范围外）。
+//! ��ƣ�PRD_v3.0 ��4.2����
+//! - frontmatter ��Ȩ����SQLite ��������/����/��ʷ��ɾ��ɴ� vault �ؽ���
+//! - entities �������ά���֣�interest/strategy/consensus + composite�����б��ѯ����ļ���
+//! - score_history �����ֱ����ʷ��frontmatter ���棩������ T1.3 ��ȴ per-type ��ѯ
+//!   ��`last_trigger_time` �� `id DESC` ȡ���¡���������ʱ���򣬹�� RFC3339 ʱ���������⣩��
+//! - entities_fts ����ͨ FTS5 �ڲ����title, content����rowid �� entities ��ʽ rowid��
+//!   ֧�� snippet���� Agent/Skill �ã�Obsidian ��������������
+//! - rebuild ����� score_history/timeline����ʷ��־������¶���¼�ɽ��ܣ�T1.4 ��Χ�⣩��
 
+#[cfg(test)]
 use std::collections::hash_map::DefaultHasher;
-use std::fs;
+#[cfg(test)]
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
-use crate::frontmatter;
+use crate::application::ports::{
+    CachedSuggestion, IndexProjection, IndexSearchHit, IndexedEntity, RepositoryPort,
+    ScoreHistoryEntry, SuggestionStats, TimelineEntry,
+};
+use crate::infrastructure::database_files::prepare_database_path;
+#[cfg(test)]
+use crate::infrastructure::vault_adapter as frontmatter;
 
-/// entities 表的行镜像（vault 文件的索引缓存）。
+/// entities ����о���vault �ļ����������棩��
 #[derive(Debug, Clone, PartialEq)]
-pub struct EntityRow {
+struct EntityRow {
     pub id: String,
-    /// 相对 vault 根的路径，正斜杠分隔。
+    /// ��� vault ����·������б�ָܷ��
     pub file_path: String,
     pub title: Option<String>,
     pub layer: Option<String>,
@@ -35,26 +44,26 @@ pub struct EntityRow {
     pub access_count: i64,
     pub last_boosted_at: Option<String>,
     pub content_hash: Option<String>,
-    /// 评分写回时间（取自 frontmatter `score.updated_at`）。
+    /// ����д��ʱ�䣨ȡ�� frontmatter `score.updated_at`����
     pub updated_at: Option<String>,
 }
 
-/// score_history 行（评分变更历史，frontmatter 不存）。
+/// score_history �У����ֱ����ʷ��frontmatter ���棩��
 #[derive(Debug, Clone)]
-pub struct ScoreHistoryRow {
+struct ScoreHistoryRow {
     pub entity_id: String,
     pub dimension: Option<String>,
     pub old: Option<f64>,
     pub new: Option<f64>,
     pub reason: Option<String>,
-    /// 触发器类型名（Cited/Linked/CaseAdded/ManualMark/ReviewCompleted/Decay/Access...）。
+    /// ��������������Cited/Linked/CaseAdded/ManualMark/ReviewCompleted/Decay/Access...����
     pub trigger: Option<String>,
     pub created_at: String,
 }
 
-/// timeline 行（访问/引用/评分事件流）。
+/// timeline �У�����/����/�����¼�������
 #[derive(Debug, Clone)]
-pub struct TimelineRow {
+struct TimelineRow {
     pub entity_id: String,
     pub event_type: String,
     pub intensity: Option<f64>,
@@ -62,9 +71,9 @@ pub struct TimelineRow {
     pub created_at: String,
 }
 
-/// FTS 搜索命中。
+/// FTS �������С�
 #[derive(Debug, Clone, PartialEq)]
-pub struct FtsHit {
+struct FtsHit {
     pub id: String,
     pub title: Option<String>,
     pub snippet: Option<String>,
@@ -72,7 +81,7 @@ pub struct FtsHit {
 
 /// Persisted Phase 4 suggestion. Suggestions are rebuildable cache rows; Vault remains authoritative.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SuggestionRow {
+struct SuggestionRow {
     pub suggestion_id: String,
     pub kind: String,
     pub entity_id: String,
@@ -89,46 +98,108 @@ pub struct SuggestionRow {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SuggestionStatsRow {
+struct SuggestionStatsRow {
     pub accepted: u64,
     pub rejected: u64,
     pub expired: u64,
 }
 
-/// 全量重建统计。
+/// ȫ���ؽ�ͳ�ơ�
 #[derive(Debug, Default, Clone)]
-pub struct RebuildStats {
+#[cfg(test)]
+struct RebuildStats {
     pub indexed: u32,
     pub skipped: u32,
     pub duplicates: u32,
 }
 
-pub struct Db {
+pub(crate) struct SqliteRepository {
     conn: Connection,
+}
+
+#[cfg(test)]
+type Db = SqliteRepository;
+
+fn indexed_entity(row: EntityRow) -> IndexedEntity {
+    IndexedEntity {
+        id: row.id,
+        file_path: row.file_path,
+        title: row.title,
+        layer: row.layer,
+        status: row.status,
+        interest: row.interest,
+        strategy: row.strategy,
+        consensus: row.consensus,
+        composite: row.composite,
+        access_count: row.access_count,
+        last_boosted_at: row.last_boosted_at,
+        content_hash: row.content_hash,
+        updated_at: row.updated_at,
+    }
+}
+
+fn entity_row(entity: &IndexedEntity) -> EntityRow {
+    EntityRow {
+        id: entity.id.clone(),
+        file_path: entity.file_path.clone(),
+        title: entity.title.clone(),
+        layer: entity.layer.clone(),
+        status: entity.status.clone(),
+        interest: entity.interest,
+        strategy: entity.strategy,
+        consensus: entity.consensus,
+        composite: entity.composite,
+        access_count: entity.access_count,
+        last_boosted_at: entity.last_boosted_at.clone(),
+        content_hash: entity.content_hash.clone(),
+        updated_at: entity.updated_at.clone(),
+    }
+}
+
+fn projection_row(projection: &IndexProjection) -> EntityRow {
+    EntityRow {
+        id: projection.id.clone(),
+        file_path: projection.file_path.clone(),
+        title: projection.title.clone(),
+        layer: projection.layer.clone(),
+        status: projection.status.clone(),
+        interest: projection.score.as_ref().map(|score| score.interest),
+        strategy: projection.score.as_ref().map(|score| score.strategy),
+        consensus: projection.score.as_ref().map(|score| score.consensus),
+        composite: projection.score.as_ref().map(|score| score.composite),
+        access_count: projection
+            .score
+            .as_ref()
+            .map(|score| score.access_count)
+            .unwrap_or_default(),
+        last_boosted_at: projection
+            .score
+            .as_ref()
+            .map(|score| score.last_boosted_at.clone()),
+        content_hash: projection.content_hash.clone(),
+        updated_at: projection
+            .score
+            .as_ref()
+            .map(|score| score.updated_at.clone()),
+    }
 }
 
 const CURRENT_SCHEMA_VERSION: i64 = 2;
 
-impl Db {
-    /// 打开（或创建）数据库文件并初始化 schema。父目录自动创建。
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("创建 db 父目录失败 {}", parent.display()))?;
-            }
-        }
-        backup_before_migration(path)?;
+impl SqliteRepository {
+    /// �򿪣��򴴽������ݿ��ļ�����ʼ�� schema����Ŀ¼�Զ�������
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        prepare_database_path(path)?;
         let conn =
-            Connection::open(path).with_context(|| format!("打开数据库失败 {}", path.display()))?;
+            Connection::open(path).with_context(|| format!("�����ݿ�ʧ�� {}", path.display()))?;
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
     }
 
-    /// 内存数据库（测试用）。
+    /// �ڴ����ݿ⣨�����ã���
     #[cfg(test)]
-    pub fn open_in_memory() -> Result<Self> {
+    pub(crate) fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let db = Self { conn };
         db.init_schema()?;
@@ -170,7 +241,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn schema_version(&self) -> Result<i64> {
+    fn schema_version(&self) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT version FROM schema_version WHERE id = 1",
             [],
@@ -178,8 +249,8 @@ impl Db {
         )?)
     }
 
-    /// upsert entity 并同步 FTS（`fts_content` = Markdown 正文，供 FTS 索引与 snippet）。
-    pub fn upsert_entity(&self, e: &EntityRow, fts_content: &str) -> Result<()> {
+    /// upsert entity ��ͬ�� FTS��`fts_content` = Markdown ���ģ��� FTS ������ snippet����
+    fn upsert_entity(&self, e: &EntityRow, fts_content: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO entities
@@ -213,7 +284,7 @@ impl Db {
             params![e.id],
             |r| r.get(0),
         )?;
-        // FTS5 内部表：先按 rowid 删旧（不存在也安全），再插新。
+        // FTS5 �ڲ�����Ȱ� rowid ɾ�ɣ�������Ҳ��ȫ�����ٲ��¡�
         tx.execute("DELETE FROM entities_fts WHERE rowid = ?1", params![rowid])?;
         tx.execute(
             "INSERT INTO entities_fts (rowid, title, content) VALUES (?1, ?2, ?3)",
@@ -223,7 +294,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn upsert_entity_with_relationships(
+    fn upsert_entity_with_relationships(
         &self,
         e: &EntityRow,
         fts_content: &str,
@@ -321,7 +392,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_entity(&self, id: &str) -> Result<Option<EntityRow>> {
+    fn get_entity(&self, id: &str) -> Result<Option<EntityRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, title, layer, status, interest, strategy, consensus,
                     composite, access_count, last_boosted_at, content_hash, updated_at
@@ -334,18 +405,7 @@ impl Db {
         }
     }
 
-    pub fn entity_id_by_file_path(&self, file_path: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT id FROM entities WHERE file_path = ?1",
-                params![file_path],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
-
-    pub fn delete_entities_under_path(&self, path: &str) -> Result<()> {
+    fn delete_entities_under_path(&self, path: &str) -> Result<()> {
         let prefix = path.trim_end_matches('/');
         let path_prefix = format!("{prefix}/");
         let entities = {
@@ -375,8 +435,8 @@ impl Db {
         Ok(())
     }
 
-    /// 按 composite 降序返回（NULL 自然排最后）。
-    pub fn list_entities(&self) -> Result<Vec<EntityRow>> {
+    /// �� composite ���򷵻أ�NULL ��Ȼ����󣩡�
+    fn list_entities(&self) -> Result<Vec<EntityRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_path, title, layer, status, interest, strategy, consensus,
                     composite, access_count, last_boosted_at, content_hash, updated_at
@@ -387,8 +447,9 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 删除实体并清理其 FTS 记录。
-    pub fn delete_entity(&self, id: &str) -> Result<()> {
+    /// ɾ��ʵ�岢������ FTS ��¼��
+    #[cfg(test)]
+    fn delete_entity(&self, id: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let rowid: Option<i64> = tx
             .query_row(
@@ -408,7 +469,7 @@ impl Db {
     }
 
     #[allow(dead_code)]
-    pub fn replace_entity_relationships(
+    fn replace_entity_relationships(
         &self,
         entity_id: &str,
         tags: &[String],
@@ -442,7 +503,7 @@ impl Db {
     }
 
     #[allow(dead_code)]
-    pub fn entity_tags(&self, entity_id: &str) -> Result<Vec<String>> {
+    fn entity_tags(&self, entity_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
             .prepare("SELECT tag FROM entity_tags WHERE entity_id = ?1 ORDER BY tag_key, tag")?;
@@ -452,7 +513,7 @@ impl Db {
     }
 
     #[allow(dead_code)]
-    pub fn entity_links(&self, entity_id: &str) -> Result<Vec<String>> {
+    fn entity_links(&self, entity_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT target_id FROM entity_links WHERE source_id = ?1 ORDER BY target_id",
         )?;
@@ -462,7 +523,7 @@ impl Db {
     }
 
     #[allow(dead_code)]
-    pub fn directly_linked_entities(&self, entity_id: &str) -> Result<Vec<String>> {
+    fn directly_linked_entities(&self, entity_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT target_id FROM entity_links WHERE source_id = ?1
              UNION
@@ -474,7 +535,7 @@ impl Db {
             .map_err(Into::into)
     }
 
-    pub fn upsert_suggestion(&self, suggestion: &SuggestionRow) -> Result<()> {
+    fn upsert_suggestion(&self, suggestion: &SuggestionRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO suggestions
                (suggestion_id, kind, entity_id, candidate, candidate_key, confidence,
@@ -502,7 +563,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_suggestion(&self, suggestion_id: &str) -> Result<Option<SuggestionRow>> {
+    fn get_suggestion(&self, suggestion_id: &str) -> Result<Option<SuggestionRow>> {
         self.conn
             .query_row(
                 "SELECT suggestion_id, kind, entity_id, candidate, candidate_key, confidence,
@@ -515,7 +576,7 @@ impl Db {
             .map_err(Into::into)
     }
 
-    pub fn update_suggestion_status(
+    fn update_suggestion_status(
         &self,
         suggestion_id: &str,
         status: &str,
@@ -527,8 +588,8 @@ impl Db {
         )? > 0)
     }
 
-    /// FTS5 搜索。query 按空白拆词、各自加引号后 AND 连接（避免 `-`/`*` 等被当作 FTS 语法）。
-    pub fn fts_search(&self, query: &str, limit: u32) -> Result<Vec<FtsHit>> {
+    /// FTS5 ������query ���հײ�ʡ����Լ����ź� AND ���ӣ����� `-`/`*` �ȱ����� FTS �﷨����
+    fn fts_search(&self, query: &str, limit: u32) -> Result<Vec<FtsHit>> {
         if contains_cjk(query) {
             return self.cjk_substring_search(query, limit);
         }
@@ -608,9 +669,9 @@ impl Db {
         Ok(hits)
     }
 
-    /// 该实体某触发器类型最近一次触发时间（供 T1.3 冷却判断）。
-    /// 按 score_history 自增 `id DESC` 取最新——插入序即时间序，规避 RFC3339 时区排序歧义。
-    pub fn last_trigger_time(&self, entity_id: &str, trigger: &str) -> Result<Option<String>> {
+    /// ��ʵ��ĳ�������������һ�δ���ʱ�䣨�� T1.3 ��ȴ�жϣ���
+    /// �� score_history ���� `id DESC` ȡ���¡���������ʱ���򣬹�� RFC3339 ʱ���������塣
+    fn last_trigger_time(&self, entity_id: &str, trigger: &str) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT created_at FROM score_history
              WHERE entity_id = ?1 AND trigger = ?2
@@ -623,7 +684,7 @@ impl Db {
         }
     }
 
-    pub fn insert_score_history(&self, h: &ScoreHistoryRow) -> Result<()> {
+    fn insert_score_history(&self, h: &ScoreHistoryRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO score_history
                (entity_id, dimension, old, new, reason, trigger, created_at)
@@ -641,7 +702,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn insert_timeline(&self, t: &TimelineRow) -> Result<()> {
+    fn insert_timeline(&self, t: &TimelineRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO timeline (entity_id, event_type, intensity, source, created_at)
              VALUES (?1,?2,?3,?4,?5)",
@@ -656,7 +717,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn score_history_between(&self, from: &str, to: &str) -> Result<Vec<ScoreHistoryRow>> {
+    fn score_history_between(&self, from: &str, to: &str) -> Result<Vec<ScoreHistoryRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT entity_id, dimension, old, new, reason, trigger, created_at
              FROM score_history
@@ -678,7 +739,7 @@ impl Db {
             .map_err(Into::into)
     }
 
-    pub fn timeline_between(&self, from: &str, to: &str) -> Result<Vec<TimelineRow>> {
+    fn timeline_between(&self, from: &str, to: &str) -> Result<Vec<TimelineRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT entity_id, event_type, intensity, source, created_at
              FROM timeline
@@ -698,7 +759,7 @@ impl Db {
             .map_err(Into::into)
     }
 
-    pub fn suggestion_stats_between(&self, from: &str, to: &str) -> Result<SuggestionStatsRow> {
+    fn suggestion_stats_between(&self, from: &str, to: &str) -> Result<SuggestionStatsRow> {
         let mut stmt = self.conn.prepare(
             "SELECT status, COUNT(*)
              FROM suggestions
@@ -722,7 +783,7 @@ impl Db {
         Ok(stats)
     }
 
-    pub fn has_report_history(&self) -> Result<bool> {
+    fn has_report_history(&self) -> Result<bool> {
         self.conn
             .query_row(
                 "SELECT EXISTS(
@@ -736,9 +797,10 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 从 vault 全量重建索引（清空 entities + FTS，重新扫描写入）。
-    /// score_history/timeline 不清空（历史保留）。无 `id` frontmatter 的笔记跳过。
-    pub fn rebuild_from_vault(&self, vault: &Path) -> Result<RebuildStats> {
+    /// �� vault ȫ���ؽ���������� entities + FTS������ɨ��д�룩��
+    /// score_history/timeline ����գ���ʷ��������� `id` frontmatter �ıʼ�������
+    #[cfg(test)]
+    fn rebuild_from_vault(&self, vault: &Path) -> Result<RebuildStats> {
         {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute("DELETE FROM entities", [])?;
@@ -753,7 +815,7 @@ impl Db {
             match parse_entity(vault, &path) {
                 Ok(Some(parsed)) => {
                     if !seen.insert(parsed.row.id.clone()) {
-                        tracing::warn!(id = %parsed.row.id, path = %path.display(), "重复 id，跳过后续文件");
+                        tracing::warn!(id = %parsed.row.id, path = %path.display(), "�ظ� id�����������ļ�");
                         stats.duplicates += 1;
                         continue;
                     }
@@ -763,7 +825,7 @@ impl Db {
                         &parsed.tags,
                         &parsed.links,
                     ) {
-                        tracing::warn!(path = %path.display(), err = %e, "索引写入失败，跳过");
+                        tracing::warn!(path = %path.display(), err = %e, "����д��ʧ�ܣ�����");
                         stats.skipped += 1;
                     } else {
                         stats.indexed += 1;
@@ -771,12 +833,315 @@ impl Db {
                 }
                 Ok(None) => stats.skipped += 1,
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), err = %e, "解析失败，跳过");
+                    tracing::warn!(path = %path.display(), err = %e, "����ʧ�ܣ�����");
                     stats.skipped += 1;
                 }
             }
         }
         Ok(stats)
+    }
+}
+
+fn upsert_projection_tx(
+    tx: &Transaction<'_>,
+    entity: &EntityRow,
+    fts_content: &str,
+    tags: &[String],
+    links: &[String],
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO entities
+           (id, file_path, title, layer, status, interest, strategy, consensus,
+            composite, access_count, last_boosted_at, content_hash, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+         ON CONFLICT(id) DO UPDATE SET
+           file_path=excluded.file_path, title=excluded.title, layer=excluded.layer,
+           status=excluded.status, interest=excluded.interest, strategy=excluded.strategy,
+           consensus=excluded.consensus, composite=excluded.composite,
+           access_count=excluded.access_count, last_boosted_at=excluded.last_boosted_at,
+           content_hash=excluded.content_hash, updated_at=excluded.updated_at",
+        params![
+            entity.id,
+            entity.file_path,
+            entity.title,
+            entity.layer,
+            entity.status,
+            entity.interest,
+            entity.strategy,
+            entity.consensus,
+            entity.composite,
+            entity.access_count,
+            entity.last_boosted_at,
+            entity.content_hash,
+            entity.updated_at,
+        ],
+    )?;
+    let rowid: i64 = tx.query_row(
+        "SELECT rowid FROM entities WHERE id = ?1",
+        params![entity.id],
+        |row| row.get(0),
+    )?;
+    tx.execute("DELETE FROM entities_fts WHERE rowid = ?1", params![rowid])?;
+    tx.execute(
+        "INSERT INTO entities_fts (rowid, title, content) VALUES (?1, ?2, ?3)",
+        params![rowid, entity.title.as_deref().unwrap_or(""), fts_content],
+    )?;
+    tx.execute(
+        "DELETE FROM entity_tags WHERE entity_id = ?1",
+        params![entity.id],
+    )?;
+    tx.execute(
+        "DELETE FROM entity_links WHERE source_id = ?1",
+        params![entity.id],
+    )?;
+    for tag in tags {
+        tx.execute(
+            "INSERT OR IGNORE INTO entity_tags (entity_id, tag, tag_key) VALUES (?1, ?2, ?3)",
+            params![entity.id, tag, tag.to_lowercase()],
+        )?;
+    }
+    for target_id in links {
+        tx.execute(
+            "INSERT OR IGNORE INTO entity_links (source_id, target_id) VALUES (?1, ?2)",
+            params![entity.id, target_id],
+        )?;
+    }
+    Ok(())
+}
+
+impl RepositoryPort for SqliteRepository {
+    fn schema_version(&self) -> Result<i64> {
+        SqliteRepository::schema_version(self)
+    }
+
+    fn replace_index_projections(&self, projections: &[IndexProjection]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM entities", [])?;
+        tx.execute("DELETE FROM entities_fts", [])?;
+        tx.execute("DELETE FROM entity_tags", [])?;
+        tx.execute("DELETE FROM entity_links", [])?;
+        for projection in projections {
+            let row = projection_row(projection);
+            upsert_projection_tx(
+                &tx,
+                &row,
+                &projection.body,
+                &projection.tags,
+                &projection.links,
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn upsert_index_projection(&self, projection: &IndexProjection) -> Result<()> {
+        let row = projection_row(projection);
+        self.upsert_entity_with_relationships(
+            &row,
+            &projection.body,
+            &projection.tags,
+            &projection.links,
+        )
+    }
+
+    fn upsert_indexed_entity(&self, entity: &IndexedEntity, body: &str) -> Result<()> {
+        self.upsert_entity(&entity_row(entity), body)
+    }
+
+    fn upsert_indexed_entity_with_relationships(
+        &self,
+        entity: &IndexedEntity,
+        body: &str,
+        tags: &[String],
+        links: &[String],
+    ) -> Result<()> {
+        self.upsert_entity_with_relationships(&entity_row(entity), body, tags, links)
+    }
+
+    fn entity_exists(&self, id: &str) -> Result<bool> {
+        Ok(self.get_entity(id)?.is_some())
+    }
+
+    fn entity_file_path(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.get_entity(id)?.map(|row| row.file_path))
+    }
+
+    fn get_entity(&self, id: &str) -> Result<Option<IndexedEntity>> {
+        SqliteRepository::get_entity(self, id).map(|row| row.map(indexed_entity))
+    }
+
+    fn list_entities(&self) -> Result<Vec<IndexedEntity>> {
+        SqliteRepository::list_entities(self)
+            .map(|rows| rows.into_iter().map(indexed_entity).collect())
+    }
+
+    fn delete_entities_under_path(&self, path: &str) -> Result<()> {
+        SqliteRepository::delete_entities_under_path(self, path)
+    }
+
+    fn replace_entity_relationships(
+        &self,
+        entity_id: &str,
+        tags: &[String],
+        links: &[String],
+    ) -> Result<()> {
+        SqliteRepository::replace_entity_relationships(self, entity_id, tags, links)
+    }
+
+    fn directly_linked_entities(&self, entity_id: &str) -> Result<Vec<String>> {
+        SqliteRepository::directly_linked_entities(self, entity_id)
+    }
+
+    fn entity_tags(&self, entity_id: &str) -> Result<Vec<String>> {
+        SqliteRepository::entity_tags(self, entity_id)
+    }
+
+    fn entity_links(&self, entity_id: &str) -> Result<Vec<String>> {
+        SqliteRepository::entity_links(self, entity_id)
+    }
+
+    fn search(&self, query: &str, limit: u32) -> Result<Vec<IndexSearchHit>> {
+        SqliteRepository::fts_search(self, query, limit).map(|hits| {
+            hits.into_iter()
+                .map(|hit| IndexSearchHit {
+                    id: hit.id,
+                    title: hit.title,
+                    snippet: hit.snippet,
+                })
+                .collect()
+        })
+    }
+
+    fn upsert_suggestion(&self, suggestion: &CachedSuggestion) -> Result<()> {
+        SqliteRepository::upsert_suggestion(
+            self,
+            &SuggestionRow {
+                suggestion_id: suggestion.suggestion_id.clone(),
+                kind: suggestion.kind.clone(),
+                entity_id: suggestion.entity_id.clone(),
+                candidate: suggestion.candidate.clone(),
+                candidate_key: suggestion.candidate_key.clone(),
+                confidence: suggestion.confidence,
+                reason: suggestion.reason.clone(),
+                source: suggestion.source.clone(),
+                algorithm_version: suggestion.algorithm_version.clone(),
+                content_hash: suggestion.content_hash.clone(),
+                status: suggestion.status.clone(),
+                created_at: suggestion.created_at.clone(),
+                updated_at: suggestion.updated_at.clone(),
+            },
+        )
+    }
+
+    fn get_suggestion(&self, suggestion_id: &str) -> Result<Option<CachedSuggestion>> {
+        SqliteRepository::get_suggestion(self, suggestion_id).map(|row| {
+            row.map(|row| CachedSuggestion {
+                suggestion_id: row.suggestion_id,
+                kind: row.kind,
+                entity_id: row.entity_id,
+                candidate: row.candidate,
+                candidate_key: row.candidate_key,
+                confidence: row.confidence,
+                reason: row.reason,
+                source: row.source,
+                algorithm_version: row.algorithm_version,
+                content_hash: row.content_hash,
+                status: row.status,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            })
+        })
+    }
+
+    fn update_suggestion_status(
+        &self,
+        suggestion_id: &str,
+        status: &str,
+        updated_at: &str,
+    ) -> Result<bool> {
+        SqliteRepository::update_suggestion_status(self, suggestion_id, status, updated_at)
+    }
+
+    fn last_trigger_time(&self, entity_id: &str, trigger: &str) -> Result<Option<String>> {
+        SqliteRepository::last_trigger_time(self, entity_id, trigger)
+    }
+
+    fn update_index_score(&self, id: &str, score: &crate::domain::entity::Score) -> Result<()> {
+        self.conn.execute(
+            "UPDATE entities SET interest = ?2, strategy = ?3, consensus = ?4, composite = ?5, access_count = ?6, last_boosted_at = ?7, updated_at = ?8 WHERE id = ?1",
+            params![id, score.interest, score.strategy, score.consensus, score.composite, score.access_count, score.last_boosted_at, score.updated_at],
+        )?;
+        Ok(())
+    }
+
+    fn record_score_history(&self, entry: &ScoreHistoryEntry) -> Result<()> {
+        SqliteRepository::insert_score_history(
+            self,
+            &ScoreHistoryRow {
+                entity_id: entry.entity_id.clone(),
+                dimension: entry.dimension.clone(),
+                old: entry.old,
+                new: entry.new,
+                reason: entry.reason.clone(),
+                trigger: entry.trigger.clone(),
+                created_at: entry.created_at.clone(),
+            },
+        )
+    }
+
+    fn record_timeline(&self, entry: &TimelineEntry) -> Result<()> {
+        SqliteRepository::insert_timeline(
+            self,
+            &TimelineRow {
+                entity_id: entry.entity_id.clone(),
+                event_type: entry.event_type.clone(),
+                intensity: entry.intensity,
+                source: entry.source.clone(),
+                created_at: entry.created_at.clone(),
+            },
+        )
+    }
+
+    fn score_history_between(&self, from: &str, to: &str) -> Result<Vec<ScoreHistoryEntry>> {
+        SqliteRepository::score_history_between(self, from, to).map(|rows| {
+            rows.into_iter()
+                .map(|row| ScoreHistoryEntry {
+                    entity_id: row.entity_id,
+                    dimension: row.dimension,
+                    old: row.old,
+                    new: row.new,
+                    reason: row.reason,
+                    trigger: row.trigger,
+                    created_at: row.created_at,
+                })
+                .collect()
+        })
+    }
+
+    fn timeline_between(&self, from: &str, to: &str) -> Result<Vec<TimelineEntry>> {
+        SqliteRepository::timeline_between(self, from, to).map(|rows| {
+            rows.into_iter()
+                .map(|row| TimelineEntry {
+                    entity_id: row.entity_id,
+                    event_type: row.event_type,
+                    intensity: row.intensity,
+                    source: row.source,
+                    created_at: row.created_at,
+                })
+                .collect()
+        })
+    }
+
+    fn suggestion_stats_between(&self, from: &str, to: &str) -> Result<SuggestionStats> {
+        SqliteRepository::suggestion_stats_between(self, from, to).map(|stats| SuggestionStats {
+            accepted: stats.accepted,
+            rejected: stats.rejected,
+            expired: stats.expired,
+        })
+    }
+
+    fn has_report_history(&self) -> Result<bool> {
+        SqliteRepository::has_report_history(self)
     }
 }
 
@@ -868,33 +1233,6 @@ fn apply_migration(tx: &Transaction<'_>, version: i64) -> Result<()> {
     Ok(())
 }
 
-fn backup_before_migration(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let conn = Connection::open(path)?;
-    let current = conn
-        .query_row(
-            "SELECT version FROM schema_version WHERE id = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .unwrap_or(None);
-    if current.unwrap_or(0) >= CURRENT_SCHEMA_VERSION {
-        return Ok(());
-    }
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    let backup_path = path.with_extension("db.pre-migration.bak");
-    fs::copy(path, &backup_path).with_context(|| {
-        format!(
-            "create database migration backup failed {}",
-            backup_path.display()
-        )
-    })?;
-    Ok(())
-}
-
 fn row_to_entity(r: &Row) -> rusqlite::Result<EntityRow> {
     Ok(EntityRow {
         id: r.get(0)?,
@@ -931,14 +1269,16 @@ fn suggestion_from_row(r: &Row) -> rusqlite::Result<SuggestionRow> {
     })
 }
 
-/// 内容指纹（DefaultHasher，固定种子，跨运行稳定；非加密，仅作变更检测）。
+/// ����ָ�ƣ�DefaultHasher���̶����ӣ��������ȶ����Ǽ��ܣ����������⣩��
+#[cfg(test)]
 fn content_hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
-/// 相对 vault 根的路径，统一正斜杠。
+/// ��� vault ����·����ͳһ��б�ܡ�
+#[cfg(test)]
 fn rel_path(vault: &Path, p: &Path) -> String {
     match p.strip_prefix(vault) {
         Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
@@ -946,7 +1286,7 @@ fn rel_path(vault: &Path, p: &Path) -> String {
     }
 }
 
-/// FTS MATCH 查询清洗：拆词、去引号、每词加双引号、AND 连接。
+/// FTS MATCH ��ѯ��ϴ����ʡ�ȥ���š�ÿ�ʼ�˫���š�AND ���ӡ�
 fn fts_query(q: &str) -> String {
     q.split_whitespace()
         .map(|w| format!("\"{}\"", w.replace('"', "")))
@@ -990,13 +1330,15 @@ fn search_snippet(content: &str, term: &str) -> String {
     format!("{prefix}{snippet}{suffix}")
 }
 
-/// 递归遍历 .md 文件，跳过隐藏目录/文件（.obsidian/.compass/.git 等）。
+/// �ݹ���� .md �ļ�����������Ŀ¼/�ļ���.obsidian/.compass/.git �ȣ���
+#[cfg(test)]
 fn walk_md(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     walk_md_inner(root, &mut out)?;
     Ok(out)
 }
 
+#[cfg(test)]
 fn walk_md_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -1018,7 +1360,8 @@ fn walk_md_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// 解析单个笔记 → EntityRow（+ 正文）。无 `id` 字段返回 None（跳过）。
+/// ���������ʼ� �� EntityRow��+ ���ģ����� `id` �ֶη��� None����������
+#[cfg(test)]
 struct ParsedEntity {
     row: EntityRow,
     body: String,
@@ -1026,16 +1369,17 @@ struct ParsedEntity {
     links: Vec<String>,
 }
 
+#[cfg(test)]
 fn parse_entity(vault: &Path, path: &Path) -> Result<Option<ParsedEntity>> {
     let note = frontmatter::read_note(path)?;
     if frontmatter::has_unrendered_templater_marker(&note.frontmatter) {
         return Ok(None);
     }
     let fm: serde_yaml::Value =
-        serde_yaml::from_str(&note.frontmatter).context("解析 frontmatter 失败")?;
+        serde_yaml::from_str(&note.frontmatter).context("���� frontmatter ʧ��")?;
     let m = fm
         .as_mapping()
-        .ok_or_else(|| anyhow::anyhow!("frontmatter 不是 mapping"))?;
+        .ok_or_else(|| anyhow::anyhow!("frontmatter ���� mapping"))?;
 
     let id = match m
         .get(serde_yaml::Value::String("id".into()))
@@ -1254,7 +1598,7 @@ mod tests {
     #[test]
     fn test_open_in_memory_creates_schema() {
         let db = Db::open_in_memory().unwrap();
-        // 表存在：插入查询不报错即证明
+        // ����ڣ������ѯ�������֤��
         let row = sample_row("know-000001");
         db.upsert_entity(&row, "body").unwrap();
         let got = db.get_entity("know-000001").unwrap().unwrap();
@@ -1271,7 +1615,7 @@ mod tests {
             let db = Db::open(&db_path).unwrap();
             db.upsert_entity(&sample_row("know-1"), "b").unwrap();
         }
-        assert!(db_path.exists(), "db 文件应被创建");
+        assert!(db_path.exists(), "db �ļ�Ӧ������");
     }
 
     #[test]
@@ -1295,7 +1639,7 @@ mod tests {
         let got = db.get_entity("know-1").unwrap().unwrap();
         assert_eq!(got.title.as_deref(), Some("Updated Title"));
         assert!((got.composite.unwrap() - 50.0).abs() < 1e-9);
-        // 实体不重复
+        // ʵ�岻�ظ�
         assert_eq!(db.list_entities().unwrap().len(), 1);
     }
 
@@ -1349,7 +1693,7 @@ mod tests {
         db.upsert_entity(&sample_row("know-2"), "Nash only")
             .unwrap();
         let hits = db.fts_search("Nash equilibrium", 10).unwrap();
-        assert_eq!(hits.len(), 1, "多词应 AND，只命中含两词的");
+        assert_eq!(hits.len(), 1, "���Ӧ AND��ֻ���к����ʵ�");
         assert_eq!(hits[0].id, "know-1");
     }
 
@@ -1358,25 +1702,25 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.upsert_entity(
             &sample_row("know-cn"),
-            "Compass 使用三维评分引擎管理个人知识。",
+            "Compass uses three dimensions to organize knowledge and 知识.",
         )
         .unwrap();
 
-        let hits = db.fts_search("评分", 10).unwrap();
+        let hits = db.fts_search("知识", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "know-cn");
-        assert!(hits[0].snippet.as_deref().unwrap().contains("评分"));
+        assert!(hits[0].snippet.as_deref().unwrap().contains("知识"));
     }
 
     #[test]
     fn test_fts_search_cjk_terms_use_and_semantics() {
         let db = Db::open_in_memory().unwrap();
-        db.upsert_entity(&sample_row("know-both"), "评分引擎用于知识管理")
+        db.upsert_entity(&sample_row("know-both"), "������������֪ʶ����")
             .unwrap();
-        db.upsert_entity(&sample_row("know-one"), "只有评分内容")
+        db.upsert_entity(&sample_row("know-one"), "ֻ����������")
             .unwrap();
 
-        let hits = db.fts_search("评分 知识", 10).unwrap();
+        let hits = db.fts_search("���� ֪ʶ", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "know-both");
     }
@@ -1385,7 +1729,7 @@ mod tests {
     fn test_fts_search_cjk_title_hit_and_zero_limit() {
         let db = Db::open_in_memory().unwrap();
         let mut row = sample_row("know-title");
-        row.title = Some("认知科学索引".to_string());
+        row.title = Some("认知 science notes".to_string());
         db.upsert_entity(&row, "unrelated body").unwrap();
 
         let hits = db.fts_search("认知", 10).unwrap();
@@ -1432,7 +1776,7 @@ mod tests {
             .unwrap();
         assert!(
             db.fts_search("alpha", 10).unwrap().is_empty(),
-            "旧内容应被替换"
+            "������Ӧ���滻"
         );
         assert_eq!(db.fts_search("beta", 10).unwrap().len(), 1);
     }
@@ -1474,7 +1818,7 @@ mod tests {
     #[test]
     fn test_last_trigger_time_returns_latest_by_insert_order() {
         let db = Db::open_in_memory().unwrap();
-        // 故意让 created_at 字典序与插入序相反，验证按 id DESC（插入序）取最新
+        // ������ created_at �ֵ�����������෴����֤�� id DESC��������ȡ����
         db.insert_score_history(&ScoreHistoryRow {
             entity_id: "know-1".into(),
             dimension: None,
@@ -1496,7 +1840,7 @@ mod tests {
         })
         .unwrap();
         let t = db.last_trigger_time("know-1", "Cited").unwrap();
-        // 插入序最新 = 第二条（id 更大），即使 created_at 更早
+        // ���������� = �ڶ�����id ���󣩣���ʹ created_at ����
         assert_eq!(t.as_deref(), Some("2026-07-01T00:00:00Z"));
     }
 
@@ -1546,7 +1890,7 @@ mod tests {
             created_at: "2026-07-05T10:00:00Z".into(),
         })
         .unwrap();
-        // 无直接查询接口，验证不报错即可（T1.5/T1.6 扩展查询）
+        // ��ֱ�Ӳ�ѯ�ӿڣ���֤��������ɣ�T1.5/T1.6 ��չ��ѯ��
         let count: i64 = db
             .conn
             .query_row("SELECT COUNT(*) FROM timeline", [], |r| r.get(0))
@@ -1573,8 +1917,8 @@ mod tests {
 
         let db = Db::open_in_memory().unwrap();
         let stats = db.rebuild_from_vault(&vault).unwrap();
-        assert_eq!(stats.indexed, 1, "有 id 的应被索引");
-        assert_eq!(stats.skipped, 1, "无 id 的应跳过");
+        assert_eq!(stats.indexed, 1, "�� id ��Ӧ������");
+        assert_eq!(stats.skipped, 1, "�� id ��Ӧ����");
 
         let got = db.get_entity("know-000001").unwrap().unwrap();
         assert_eq!(got.title.as_deref(), Some("Game Theory"));
@@ -1585,7 +1929,7 @@ mod tests {
         assert_eq!(db.entity_tags("know-000001").unwrap(), vec!["Rust"]);
         assert_eq!(db.entity_links("know-000001").unwrap(), vec!["know-000002"]);
 
-        // FTS 可查
+        // FTS �ɲ�
         let hits = db.fts_search("Nash", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "know-000001");
@@ -1611,7 +1955,7 @@ mod tests {
         db.rebuild_from_vault(&vault).unwrap();
         db.rebuild_from_vault(&vault).unwrap();
         let list = db.list_entities().unwrap();
-        assert_eq!(list.len(), 2, "rebuild 两次不应重复");
+        assert_eq!(list.len(), 2, "rebuild ���β�Ӧ�ظ�");
     }
 
     #[test]
@@ -1631,12 +1975,12 @@ mod tests {
         .unwrap();
         let db = Db::open_in_memory().unwrap();
         let stats = db.rebuild_from_vault(&vault).unwrap();
-        assert_eq!(stats.indexed, 1, "首个索引，重复的跳过");
-        assert_eq!(stats.duplicates, 1, "重复 id 计数");
-        // 恰好一个被索引（不依赖 read_dir 顺序）
+        assert_eq!(stats.indexed, 1, "�׸��������ظ�������");
+        assert_eq!(stats.duplicates, 1, "�ظ� id ����");
+        // ǡ��һ���������������� read_dir ˳��
         let hf = db.fts_search("alpha", 10).unwrap().len();
         let hs = db.fts_search("beta", 10).unwrap().len();
-        assert_eq!(hf + hs, 1, "两个同 id 文件只索引一个");
+        assert_eq!(hf + hs, 1, "����ͬ id �ļ�ֻ����һ��");
     }
     #[test]
     fn test_rebuild_skips_hidden_dirs() {
@@ -1750,7 +2094,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_vault_sample() {
-        // 使用固定 fixture，避免运行时评分改写跟踪 vault 后污染测试断言。
+        // ʹ�ù̶� fixture����������ʱ���ָ�д���� vault ����Ⱦ���Զ��ԡ�
         let dir = tempdir().unwrap();
         let vault = dir.path().join("vault");
         fs::create_dir_all(vault.join("Projects")).unwrap();
@@ -1768,11 +2112,11 @@ mod tests {
         .unwrap();
         let db = Db::open_in_memory().unwrap();
         let stats = db.rebuild_from_vault(&vault).unwrap();
-        assert_eq!(stats.indexed, 1, "应索引 fixture compass-v2.md");
+        assert_eq!(stats.indexed, 1, "Ӧ���� fixture compass-v2.md");
         let got = db.get_entity("proj-compass-v3").unwrap();
         assert!(
             got.is_some(),
-            "fixture compass-v2.md 的 id=proj-compass-v3 应被索引"
+            "fixture compass-v2.md �� id=proj-compass-v3 Ӧ������"
         );
         let got = got.unwrap();
         assert_eq!(got.file_path, "Projects/compass-v2.md");
@@ -1791,11 +2135,11 @@ mod tests {
         assert_eq!(fts_query("Nash equilibrium"), "\"Nash\" \"equilibrium\"");
         assert_eq!(fts_query(""), "");
         assert_eq!(fts_query("   "), "");
-        // 引号被剥离，避免注入 FTS 语法
+        // ���ű����룬����ע�� FTS �﷨
         assert_eq!(fts_query("\"inject"), "\"inject\"");
     }
 
-    /// TC-V03: Vault 是权威；即使 SQLite 索引暂时不一致，rebuild 也能从 Vault 恢复。
+    /// TC-V03: Vault ��Ȩ������ʹ SQLite ������ʱ��һ�£�rebuild Ҳ�ܴ� Vault �ָ���
     #[test]
     fn rebuild_restores_index_from_authoritative_vault() {
         let dir = tempdir().unwrap();
@@ -1811,19 +2155,19 @@ mod tests {
         db.rebuild_from_vault(&vault).unwrap();
         assert!(db.get_entity("know-recover").unwrap().is_some());
 
-        // 模拟 SQLite 索引丢失：rebuild 一个空 vault 会清空 entities/fts
+        // ģ�� SQLite ������ʧ��rebuild һ���� vault ����� entities/fts
         db.rebuild_from_vault(&empty_vault).unwrap();
         assert!(db.get_entity("know-recover").unwrap().is_none());
 
-        // Vault 内容不变，rebuild 恢复索引
+        // Vault ���ݲ��䣬rebuild �ָ�����
         db.rebuild_from_vault(&vault).unwrap();
         let recovered = db.get_entity("know-recover").unwrap().unwrap();
         assert_eq!(recovered.title.as_deref(), Some("Recover"));
         assert!((recovered.composite.unwrap() - 85.3).abs() < 1e-9);
     }
 
-    /// TC-I02: rebuild 与 watcher 对同一份笔记产生等价的索引投影。
-    /// 使用无 outgoing refs 的笔记，避免 watcher 触发 Linked/Cited 副作用。
+    /// TC-I02: rebuild �� watcher ��ͬһ�ݱʼǲ����ȼ۵�����ͶӰ��
+    /// ʹ���� outgoing refs �ıʼǣ����� watcher ���� Linked/Cited �����á�
     #[tokio::test]
     async fn rebuild_and_watcher_produce_equivalent_index_projections() {
         use std::sync::Arc;
@@ -1837,14 +2181,15 @@ mod tests {
         let path = vault.join("know-shared.md");
         fs::write(&path, note).unwrap();
 
-        // 路径 1：rebuild_from_vault
+        // ·�� 1��rebuild_from_vault
         let db_rebuild = Db::open_in_memory().unwrap();
         db_rebuild.rebuild_from_vault(&vault).unwrap();
         let rebuilt = db_rebuild.get_entity("know-shared").unwrap().unwrap();
 
-        // 路径 2：watcher process_single_file
-        let db_watcher = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let weights = crate::models::Weights::default();
+        // ·�� 2��watcher process_single_file
+        let db_watcher: crate::application::ports::RepositoryHandle =
+            Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let weights = crate::domain::entity::Weights::default();
         crate::watcher::process_single_file(&vault, &db_watcher, &weights, &path)
             .await
             .unwrap();
@@ -1855,7 +2200,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(rebuilt, watched);
+        assert_eq!(indexed_entity(rebuilt), watched);
         assert_eq!(
             db_rebuild.entity_tags("know-shared").unwrap(),
             db_watcher.lock().await.entity_tags("know-shared").unwrap()

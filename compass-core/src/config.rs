@@ -1,6 +1,6 @@
 //! 加载 compass.toml 运行时配置。
 
-use crate::models::Weights;
+use crate::domain::entity::Weights;
 use serde::Deserialize;
 use std::path::PathBuf;
 

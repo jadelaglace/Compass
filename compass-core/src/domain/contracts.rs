@@ -135,72 +135,6 @@ fn validate_stable_id(actual: &str, expected: String) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ApiError {
-    pub code: String,
-    pub message: String,
-    pub details: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WeeklyReportFixture {
-    pub from: String,
-    pub to: String,
-    pub tz: String,
-    pub generated_at: String,
-    pub data_quality: DataQuality,
-    pub score_changes: Vec<ScoreChangeFixture>,
-    pub access_count: u64,
-    pub new_entities: Vec<String>,
-    pub suggestion_stats: SuggestionStats,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct WeeklyReport {
-    pub from: String,
-    pub to: String,
-    pub tz: String,
-    pub generated_at: String,
-    pub data_quality: DataQuality,
-    pub score_changes: Vec<ScoreChangeFixture>,
-    pub score_increases: Vec<ScoreChangeFixture>,
-    pub score_decreases: Vec<ScoreChangeFixture>,
-    pub access_count: u64,
-    pub review_count: u64,
-    pub access_stats: AccessStats,
-    pub new_entities: Vec<String>,
-    pub suggestion_stats: SuggestionStats,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AccessStats {
-    pub total: u64,
-    pub glance: u64,
-    pub read: u64,
-    pub study: u64,
-    pub apply: u64,
-    pub review: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DataQuality {
-    pub history_unavailable: bool,
-    pub missing: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ScoreChangeFixture {
-    pub entity_id: String,
-    pub delta: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SuggestionStats {
-    pub accepted: u64,
-    pub rejected: u64,
-    pub expired: u64,
-}
-
 pub fn stable_suggestion_id(
     kind: SuggestionKind,
     entity_id: &str,
@@ -451,18 +385,14 @@ mod tests {
     #[test]
     fn phase4_fixtures_match_the_frozen_contracts() {
         let suggestion: TagSuggestion =
-            serde_json::from_str(include_str!("../fixtures/phase4/tag-suggestion.json")).unwrap();
+            serde_json::from_str(include_str!("../../fixtures/phase4/tag-suggestion.json"))
+                .unwrap();
         assert_eq!(suggestion.status, SuggestionStatus::Pending);
         suggestion.validate().unwrap();
-        let related: RelatedSuggestion =
-            serde_json::from_str(include_str!("../fixtures/phase4/related-suggestion.json"))
-                .unwrap();
+        let related: RelatedSuggestion = serde_json::from_str(include_str!(
+            "../../fixtures/phase4/related-suggestion.json"
+        ))
+        .unwrap();
         related.validate().unwrap();
-        let error: ApiError =
-            serde_json::from_str(include_str!("../fixtures/phase4/error.json")).unwrap();
-        assert_eq!(error.code, "suggestion_expired");
-        let report: WeeklyReportFixture =
-            serde_json::from_str(include_str!("../fixtures/phase4/weekly-report.json")).unwrap();
-        assert_eq!(report.tz, "Asia/Shanghai");
     }
 }

@@ -106,15 +106,15 @@ T4.9 取代历史的持久化 interest 衰减：`score` 中的三维基础分只
 | ID | 任务 | 依赖 | 工时 | 验收 |
 |----|------|------|------|------|
 | P5.1 | ✅ 覆盖缺口审查与刻画测试（#234 / PR #235） | `ARCHITECTURE.md`、`TEST_CASES.md` | 4h | 已逐一核查 TC-D/TC-V/TC-I/TC-Q/TC-H/TC-K/TC-A；补齐可在当前架构稳定刻画的测试，既有回归全通，剩余缺口已明确归属后续步骤 |
-| P5.2 | Domain/DTO 分界与模块骨架 | P5.1 | 6h | 建立 `domain/`、`application/`、`infrastructure/`、`transport/` 子目录与 `mod.rs`；`pub(crate)` 可见性约束生效；Application/Domain 不导入 Axum 或 SQL 行类型 |
-| P5.3a | Vault 适配层隔离 | P5.2 | 6h | frontmatter 解析与原子写入封装在 `vault_adapter.rs`；其他层通过 port 调用；`db.rs` 不再解析 Markdown 或处理文件 I/O |
-| P5.3b | 索引服务提取 | P5.3a | 4h | `index_service.rs` 统一 rebuild 与 watcher 的解析→投影路径；watcher 不再直接操作 SQLite |
-| P5.4 | SQLite 仓储与锁范围收敛 | P5.3b | 6h | `EntityRow` 及 SQL 语句为 `sqlite_repository.rs` 私有；数据库锁不覆盖文件 I/O、排序或 `.await` |
-| P5.5 | 查询、实体、建议应用服务 | P5.4 | 8h | HTTP handler 仅做校验、调用与序列化；业务逻辑迁入应用服务层 |
-| P5.6 | 架构收尾与回归验收 | P5.5 | 4h | 删除废弃耦合；Rust、HTTP/Skill E2E、rebuild 幂等回归全通；文档与实际结构一致 |
-| P5.7 | Dataview 查询模板库 | —（独立） | 3h | `docs/dataview-queries.md` 覆盖既定查询场景；可与 P5.1–P5.6 并行 |
-| P5.8 | Git 自动提交备份 | —（独立） | 4h | 每日 diff 可审计且不影响 Vault 权威性；可与 P5.2+ 并行 |
-| P5.9 | 跨端同步（Syncthing/WebDAV） | P5.8 | 4h | 同步冲突与重建路径经过验证 |
+| P5.2 | ✅ Domain/DTO 分界与模块骨架 | P5.1 | 6h | 已建立 `domain/`、`application/`、`infrastructure/`、`transport/` 子目录与 `mod.rs`；领域模型与规则、HTTP DTO/路由已迁入相应边界，`pub(crate)` 可见性约束和无 Axum/SQL 行类型回归检查生效 |
+| P5.3a | ✅ Vault 适配层隔离 | P5.2 | 6h | frontmatter 解析、扫描与原子写入已封装在 `infrastructure/vault_adapter.rs`；HTTP 与 rebuild 通过 `VaultPort` 调用；`db.rs` 不再扫描或解析 Markdown |
+| P5.3b | ✅ 索引服务提取 | P5.3a | 4h | `application/index_service.rs` 统一 rebuild 与 watcher 的解析→投影路径；watcher 仅做 notify 适配与去抖，不再直接操作 SQLite；全量替换在短事务中完成，TC-I02/TC-A04 回归生效 |
+| P5.4 | ✅ SQLite 仓储与锁范围收敛 | P5.3b | 6h | `EntityRow` 及 SQL 语句为 `sqlite_repository.rs` 私有；数据库锁不覆盖文件 I/O、排序或 `.await` |
+| P5.5 | ✅ 查询、实体、建议应用服务 | P5.4 | 8h | `QueryService`、`EntityService`、`SuggestionService` 承载用例编排；HTTP handler 仅做 DTO 适配、调用与序列化 |
+| P5.6 | ✅ 架构收尾与回归验收 | P5.5 | 4h | 已删除 HTTP 遗留编排与临时 dead-code 豁免；Rust、HTTP/Skill E2E、rebuild 幂等回归全通；文档与实际结构一致 |
+| P5.7 | ✅ Dataview 查询模板库 | —（独立） | 3h | `docs/dataview-queries.md` 已覆盖 Top 高分、待复习、战略焦点、按层/分类/标签聚合、内容更新、孤儿与评分差异场景；模板直接读取稳定的 frontmatter 基础分 |
+| P5.8 | ✅ Git 自动提交备份 | —（独立） | 4h | 已提供独立 Vault Git 仓库的 Markdown/稳定 Obsidian 配置白名单提交、审计日志、无变更不建空提交、预暂存保护与 Windows 每日任务安装脚本；Git 不参与 Compass API、索引、评分或恢复决策 |
+| P5.9 | ✅ 跨端同步（Syncthing/WebDAV） | P5.8 | 4h | 已提供 Syncthing 首选与冲突保留型 WebDAV 操作规范；冲突副本不入索引、watcher 触发重建；双临时 Syncthing 实例的离线并发冲突与 Compass 启动重建已验证 |
 
 > P5.1–P5.6 以 [`ARCHITECTURE.md`](ARCHITECTURE.md) 和 [`TEST_CASES.md`](TEST_CASES.md) 为设计、测试与验收基线；未经 PRD 更新不得改变公开 HTTP、Skill 或 Vault 契约。
 
@@ -131,3 +131,5 @@ Phase 1、Phase 2、Phase 3 已完成。Phase 3 的本地验收从 `skills/compa
 证据：`cargo test --release`（141 个 Rust 测试）、`skills/compass/test_e2e.py`（17 个 HTTP/skill E2E）和 `skills/compass/test_compass.py`（23 个 Skill 单测）。完整验收见 [`docs/PHASE1_4_TEST_REPORT.md`](PHASE1_4_TEST_REPORT.md)。
 
 Phase 4 的 T4.0-T4.9 已完成。skill 已覆盖标签候选、关联推荐、accept/reject、周报、服务认证与实时有效分，并通过 action → Rust API → Vault/SQLite → render 的本地 E2E。
+
+P5.1–P5.9 已完成：`domain/` 承载纯模型与规则，`application/` 承载查询、实体、建议和索引用例，`infrastructure/` 承载 SQLite 与 Vault 适配器，`transport/http.rs` 仅保留 Axum DTO、路由、认证和错误序列化。rebuild 与 watcher 共享 `IndexService`，查询服务显式接收请求时间；P5.8 的外置 Git 任务记录 Vault 已有写入结果，P5.9 的外置同步工具仅复制 Vault 内容并保留冲突副本，不改变任何公开 HTTP、Skill、Vault 与冻结 Web 契约。Phase 5 已完成。

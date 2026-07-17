@@ -9,7 +9,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::models::{EffectiveScore, Freshness, FreshnessMode, Score, Weights};
+use crate::domain::entity::{EffectiveScore, Freshness, FreshnessMode, Score, Weights};
 
 // ============ 综合分（T1.1） ============
 

@@ -1,6 +1,6 @@
 # Compass Architecture Design
 
-> Version: v1.0 | Date: 2026-07-11 | Status: target architecture for Phase 5
+> Version: v1.0 | Date: 2026-07-12 | Status: implemented Phase 5 architecture
 >
 > This document bridges the product requirements and implementation plan. It defines the module boundaries, dependency direction, data ownership, runtime flows, and migration acceptance criteria for Compass v3.
 
@@ -42,11 +42,14 @@ flowchart TB
     Entity --> Repo
     Suggest --> Repo
     Index --> Repo
-    Repo --> Sqlite["Infrastructure: SQLite repository"]
-    Entity --> Vault["Infrastructure: Vault adapter"]
+    Query --> Vault["Vault port"]
+    Entity --> Vault
+    Suggest --> Vault
     Index --> Vault
+    Repo --> Sqlite["Infrastructure: SQLite repository"]
+    Vault --> VaultAdapter["Infrastructure: Vault adapter"]
     Sqlite --> DB[("SQLite index/history")]
-    Vault --> Files[("Markdown + frontmatter")]
+    VaultAdapter --> Files[("Markdown + frontmatter")]
 ```
 
 ### 3.1 Layers and Responsibilities
@@ -54,7 +57,7 @@ flowchart TB
 | Layer | Responsibility | May depend on | Must not depend on |
 |---|---|---|---|
 | Transport | Axum routes, auth, HTTP request/response DTOs, status-to-error mapping | Application interfaces | `rusqlite`, frontmatter parsing, SQL row types |
-| Application | Use-case orchestration: query, create, score, access, suggestions, weekly report, indexing | Domain and repository/Vault ports | Axum types, SQL details, `EntityRow` |
+| Application | Use-case orchestration: query/reporting, create, score, access, suggestions, indexing | Domain and repository/Vault ports | Axum types, SQL details, `EntityRow` |
 | Domain | Entity concepts, score calculation, freshness rules, validation, stable identifiers | Rust standard library and small value dependencies | HTTP, files, SQLite, Tokio |
 | Infrastructure | SQLite repository, Vault/Markdown adapter, file watcher adapter | Domain types and application ports | HTTP DTOs or route logic |
 | Composition root | Configuration, concrete dependency creation, server/watcher startup | All layers | Business rules |
@@ -79,6 +82,18 @@ flowchart TB
 | Create/score/access/tag/related request and JSON response shapes | HTTP transport | HTTP JSON only |
 
 The Vault write path is authoritative: update frontmatter first, then update the derived SQLite index and history. If the index update fails after a successful Vault write, return an error and let watcher/rebuild reconcile the cache; never roll back the Vault by reconstructing old content from SQLite.
+
+### 4.1 Vault Backup Boundary
+
+P5.8 Git backup is an external operational tool, not a Compass runtime dependency. `scripts/Backup-CompassVault.ps1` operates only on a dedicated Git repository whose worktree is exactly the configured Vault. It stages a documented Markdown/Obsidian-settings allowlist, prints the staged diff, and creates one dated local commit when eligible changes exist. It refuses pre-existing staged changes so it cannot silently absorb a manual Git operation.
+
+The backup task is installed separately by `scripts/Install-CompassVaultBackupTask.ps1`; it may run Git, but `main.rs`, application services, watcher, and Vault adapter may not. Backup failure must not block a Vault write, API request, index reconciliation, or score calculation. Git history is a derived recovery aid: it has no authority to provide query data or restore/overwrite Vault files. The scripts do not pull, push, reset, checkout, or clean. The operating procedure and allowlist are defined in [`VAULT_BACKUP.md`](VAULT_BACKUP.md).
+
+### 4.2 Cross-Device Sync Boundary
+
+P5.9 uses an external file synchronizer (Syncthing first; a conflict-preserving WebDAV client as an alternative). It synchronizes authoritative Vault files only. Each device keeps its own `.git` and `.compass` directories; Compass neither invokes the synchronizer nor treats SQLite or Git as synchronization input.
+
+Conflict copies are preserved for manual resolution and identified by `.sync-conflict-` or `.webdav-conflict-` in the filename. `VaultAdapter` excludes them from full scans and changed-path indexing. When the watcher observes a conflict-copy event, it requests an index rebuild after the debounce window so a rename cannot leave an obsolete projection behind. No code merges, deletes, or selects a conflict version. The operating procedure and real-device validation are defined in [`VAULT_SYNC.md`](VAULT_SYNC.md).
 
 ## 5. Runtime Flows
 
@@ -113,7 +128,7 @@ The Vault write path is authoritative: update frontmatter first, then update the
 - Time must be injected into application services that calculate freshness. Tests must not depend on wall-clock time.
 - Errors cross layers as typed application/domain errors. Only Transport converts them into HTTP status codes and JSON error bodies.
 
-## 7. Target Module Layout
+## 7. Module Layout
 
 The migration may begin as modules in `compass-core/src`; a multi-crate split is not a Phase 5 requirement.
 
@@ -125,21 +140,38 @@ compass-core/src/
     scoring.rs                    # pure score and freshness rules
   application/
     query_service.rs              # feed, top, search, graph, context
-    entity_service.rs             # create, score, access, metadata patch
-    suggestion_service.rs         # tag/related/weekly-report workflows
+    entity_service.rs             # create, score, access workflows
+    suggestion_service.rs         # tag/related suggestion workflows
     index_service.rs              # rebuild and changed-file indexing
     ports.rs                      # repository and Vault interfaces
   infrastructure/
     sqlite_repository.rs          # SQL, EntityRow, FTS, history, suggestion rows
     vault_adapter.rs              # Markdown/frontmatter scanning and writes
-    notify_watcher.rs             # notify adapter
+  watcher.rs                      # notify adapter
   transport/
     http.rs                       # routes, auth, DTOs, HTTP errors
 ```
 
-This is a boundary target, not an instruction to introduce unnecessary wrappers. A port is added only where Application needs to vary or isolate an external capability; pure domain helpers remain direct functions.
+This is the implemented boundary map. A port is added only where Application needs to vary or isolate an external capability; pure domain helpers remain direct functions.
 
-## 8. Phase 5 Migration Order and Acceptance
+## 8. Implemented Module Map
+
+`main.rs` is the composition root. It creates `SqliteRepository`, `VaultAdapter`, `IndexService`, `FileWatcher`, and the secured HTTP router. The HTTP router only adapts DTOs, invokes `QueryService`, `EntityService`, or `SuggestionService`, and converts typed application errors to the established HTTP response contract.
+
+| Module | Implemented responsibility |
+|---|---|
+| `domain/` | Entity, score/freshness rules, Vault value types, stable suggestion contracts |
+| `application/query_service.rs` | Feed, top, detail, search, graph, agent context, and weekly report; receives the request timestamp explicitly |
+| `application/entity_service.rs` | Authoritative create, score, and access workflows |
+| `application/suggestion_service.rs` | Tag and related recommendation generation, stale handling, accept/reject, relationship-index refresh |
+| `application/index_service.rs` | Shared rebuild and changed-file projection workflows |
+| `application/ports.rs` | Repository and Vault boundaries consumed by application services |
+| `infrastructure/sqlite_repository.rs` | SQLite schema, rows, FTS, history, and suggestion persistence |
+| `infrastructure/vault_adapter.rs` | Markdown/frontmatter scanning, parsing, and atomic Vault writes |
+| `watcher.rs` | Notify/debounce adapter that delegates to `IndexService` |
+| `transport/http.rs` | Axum routes, HTTP DTOs/auth, and application-error serialization |
+
+## 9. Phase 5 Migration Order and Acceptance
 
 | Step | Deliverable | Acceptance |
 |---|---|---|
@@ -148,11 +180,14 @@ This is a boundary target, not an instruction to introduce unnecessary wrappers.
 | P5.3 | Extract Vault adapter and index service | `db.rs` no longer scans directories or parses Markdown; rebuild and watcher share one indexing path |
 | P5.4 | Extract SQLite repository and tighten locking | `EntityRow` is infrastructure-private; file work and sorting occur after the repository lock is released |
 | P5.5 | Extract query/entity/suggestion application services | HTTP handlers only validate, call a service, and serialize a result |
-| P5.6 | Remove obsolete coupling and document the final map | Full Rust, HTTP/Skill E2E, and rebuild/idempotence regressions pass; no public contract changes without an explicit PRD update |
+| P5.6 | Remove obsolete coupling and document the final map | Complete: obsolete HTTP handler implementations removed; the final map above matches the source tree; full Rust, HTTP/Skill E2E, and rebuild/idempotence regressions pass without public-contract changes |
+| P5.7 | Publish Dataview query templates | Complete: direct frontmatter queries cover the established Obsidian views without using SQLite or API contracts |
+| P5.8 | Add auditable daily Vault Git backup | Dedicated Vault Git worktree, allowlisted local commits, no-op behavior, pre-staged-change refusal, and external Windows task installation are covered by integration checks |
+| P5.9 | Configure cross-device sync | Complete: Syncthing conflict copies are isolated from indexing, watcher conflict events rebuild the local projection, and a two-instance Syncthing conflict plus Compass rebuild has been verified without changing Vault authority |
 
 Each step is independently mergeable. Keep existing endpoints, Vault format, score semantics, and frozen Web compatibility intact throughout the migration.
 
-## 9. Test Strategy and TDD
+## 10. Test Strategy and TDD
 
 TDD is a development practice, not an architecture specification. It is useful here only after the boundary above is agreed:
 

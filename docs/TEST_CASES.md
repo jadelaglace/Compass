@@ -1,6 +1,6 @@
 # Compass v3 Test Cases
 
-> Version: v1.0 | Date: 2026-07-11 | Status: active acceptance baseline
+> Version: v1.1 | Date: 2026-07-12 | Status: active acceptance baseline
 >
 > Upstream: [`ARCHITECTURE.md`](ARCHITECTURE.md). Downstream execution: [`PLAN.md`](PLAN.md). This document specifies behavior to preserve and extend; test implementation belongs with the relevant Rust or Skill module.
 
@@ -30,6 +30,10 @@
 | TC-H01 | Access an API on localhost and on non-local bind settings | Unsafe exposure is rejected unless explicitly configured; optional bearer auth is enforced | API E2E |
 | TC-K01 | Run each public Skill action against a Compass instance | Skill request, HTTP contract, Vault/SQLite effects, and render output remain compatible | Skill E2E |
 | TC-W01 | Request the retained static Web entry point and `/graph` | Existing page and graph response remain reachable; no feature expansion is implied | HTTP smoke |
+| TC-B01 | Back up an isolated dedicated Vault Git repository | Only Markdown and documented stable Obsidian settings are committed; the script emits a name/status diff and commit hash while preserving the working Markdown | PowerShell/Git integration |
+| TC-B02 | Re-run backup with no eligible changes or a pre-existing staged change | No empty commit is created; pre-existing staging is refused and no backup commit is created | PowerShell/Git integration |
+| TC-Y01 | Rebuild a Vault containing a primary Markdown note and a sync conflict copy with the same ID | Only the primary note is indexed; the conflict copy is retained but does not become a duplicate entity; after manual resolution, rebuild replaces the local projection | Rust integration |
+| TC-Y02 | Receive a sync conflict-copy watcher event | The watcher requests a rebuild; neither the conflict copy nor a stale pre-rename projection remains indexed | Rust integration/manual two-device acceptance |
 
 ## 3. Architecture Regression Cases
 
@@ -51,6 +55,8 @@ Architecture cases may use compilation/privacy checks, focused source-boundary t
 | Vault, SQLite, watcher, or indexing change | TC-V, TC-I, TC-A04/A05 coverage plus Rust tests |
 | HTTP contract or auth change | Relevant TC-Q/TC-H cases plus Skill E2E when Skill consumes the endpoint |
 | Skill change | Relevant renderer tests and TC-K01 E2E |
+| Vault backup script or task change | TC-B01/B02 integration check plus `git diff --check` |
+| Sync conflict handling or synchronization procedure change | TC-Y01/Y02 coverage plus manual two-device conflict/rebuild validation |
 | Documentation-only change | Link check/review and `git diff --check` |
 
 The current command baseline is:

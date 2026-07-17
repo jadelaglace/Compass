@@ -11,18 +11,19 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 
-use crate::api::{
-    self, AccessRequest, AppState, CreateEntityRequest, FeedQuery, ScoreUpdateRequest,
+use crate::application::ports::IndexedEntity;
+use crate::domain::entity::Weights;
+use crate::infrastructure::sqlite_repository::SqliteRepository;
+use crate::infrastructure::vault_adapter as frontmatter;
+use crate::transport::http::{
+    self as api, AccessRequest, AppState, CreateEntityRequest, FeedQuery, ScoreUpdateRequest,
 };
-use crate::db::{Db, EntityRow};
-use crate::frontmatter;
-use crate::models::Weights;
 use crate::watcher;
 
 fn setup(vault: &std::path::Path) -> AppState {
     AppState {
-        db: Arc::new(Mutex::new(Db::open_in_memory().unwrap())),
-        vault: vault.to_path_buf(),
+        repository: Arc::new(Mutex::new(SqliteRepository::open_in_memory().unwrap())),
+        vault: Arc::new(frontmatter::VaultAdapter::new(vault.to_path_buf())),
         weights: Weights::default(),
     }
 }
@@ -185,7 +186,7 @@ async fn test_e2e_watcher_assigns_default_score() {
     fs::write(&path, md).unwrap();
 
     // watcher 处理：应为无 score 笔记计算默认评分并写回
-    watcher::process_single_file(&vault, &state.db, &state.weights, &path)
+    watcher::process_single_file(&vault, &state.repository, &state.weights, &path)
         .await
         .unwrap();
 
@@ -200,7 +201,12 @@ async fn test_e2e_watcher_assigns_default_score() {
     assert_eq!(score.access_count, 0);
 
     // 验证已索引到 db
-    let entity = state.db.lock().await.get_entity("know-000001").unwrap();
+    let entity = state
+        .repository
+        .lock()
+        .await
+        .get_entity("know-000001")
+        .unwrap();
     assert!(entity.is_some());
     let entity = entity.unwrap();
     assert_eq!(entity.title.as_deref(), Some("无评分笔记"));
@@ -225,13 +231,13 @@ async fn test_e2e_watcher_recalculates_existing_score() {
     let path = vault.join("know-000001.md");
     fs::write(&path, md).unwrap();
 
-    watcher::process_single_file(&vault, &state.db, &state.weights, &path)
+    watcher::process_single_file(&vault, &state.repository, &state.weights, &path)
         .await
         .unwrap();
 
     // composite 应被重算（80*0.4+90*0.35+70*0.25 = 32+31.5+17.5 = 81）
     let entity = state
-        .db
+        .repository
         .lock()
         .await
         .get_entity("know-000001")
@@ -284,14 +290,14 @@ async fn test_e2e_search_after_create() {
 /// Feed 三模式端到端：explore/consolidate/strategic 排序正确
 #[tokio::test]
 async fn test_p2_feed_three_modes_e2e() {
-    use crate::api;
+    use crate::transport::http as api;
 
     let dir = tempdir().unwrap();
     let vault = dir.path().join("vault");
     fs::create_dir_all(&vault).unwrap();
     let state = api::AppState {
-        db: Arc::new(Mutex::new(Db::open_in_memory().unwrap())),
-        vault: vault.clone(),
+        repository: Arc::new(Mutex::new(SqliteRepository::open_in_memory().unwrap())),
+        vault: Arc::new(frontmatter::VaultAdapter::new(vault.clone())),
         weights: Weights::default(),
     };
 
@@ -305,7 +311,7 @@ async fn test_p2_feed_three_modes_e2e() {
     ];
 
     for (id, comp, strat, boosted) in &entities {
-        let entity = EntityRow {
+        let entity = IndexedEntity {
             id: id.to_string(),
             file_path: format!("{id}.md"),
             title: Some(id.to_string()),
@@ -321,10 +327,10 @@ async fn test_p2_feed_three_modes_e2e() {
             updated_at: Some("2026-07-09T00:00:00Z".to_string()),
         };
         state
-            .db
+            .repository
             .lock()
             .await
-            .upsert_entity(&entity, "body")
+            .upsert_indexed_entity(&entity, "body")
             .unwrap();
     }
 
@@ -371,19 +377,19 @@ async fn test_p2_feed_three_modes_e2e() {
 /// Graph 节点大小=composite：验证 /graph 返回的节点含 composite 字段
 #[tokio::test]
 async fn test_p2_graph_node_size_equals_score() {
-    use crate::api;
+    use crate::transport::http as api;
 
     let dir = tempdir().unwrap();
     let vault = dir.path().join("vault");
     fs::create_dir_all(&vault).unwrap();
     let state = api::AppState {
-        db: Arc::new(Mutex::new(Db::open_in_memory().unwrap())),
-        vault: vault.clone(),
+        repository: Arc::new(Mutex::new(SqliteRepository::open_in_memory().unwrap())),
+        vault: Arc::new(frontmatter::VaultAdapter::new(vault.clone())),
         weights: Weights::default(),
     };
 
     // 两个实体：高分 + 低分
-    let high = EntityRow {
+    let high = IndexedEntity {
         id: "know-high".to_string(),
         file_path: "high.md".to_string(),
         title: Some("High".to_string()),
@@ -398,7 +404,7 @@ async fn test_p2_graph_node_size_equals_score() {
         content_hash: Some("h".to_string()),
         updated_at: Some("2026-07-09T00:00:00Z".to_string()),
     };
-    let low = EntityRow {
+    let low = IndexedEntity {
         id: "know-low".to_string(),
         file_path: "low.md".to_string(),
         title: Some("Low".to_string()),
@@ -413,8 +419,18 @@ async fn test_p2_graph_node_size_equals_score() {
         content_hash: Some("l".to_string()),
         updated_at: Some("2026-07-09T00:00:00Z".to_string()),
     };
-    state.db.lock().await.upsert_entity(&high, "body").unwrap();
-    state.db.lock().await.upsert_entity(&low, "body").unwrap();
+    state
+        .repository
+        .lock()
+        .await
+        .upsert_indexed_entity(&high, "body")
+        .unwrap();
+    state
+        .repository
+        .lock()
+        .await
+        .upsert_indexed_entity(&low, "body")
+        .unwrap();
 
     let result = api::graph(axum::extract::State(state)).await.unwrap().0;
     assert_eq!(result.nodes.len(), 2);

@@ -127,6 +127,14 @@ composite = interest*0.40 + strategy*0.35 + consensus*0.25
 - **Templater**：用 `vault/Templates/` 下的模板新建笔记（含完整 score 骨架）
 - **无需插件**：分数写回 frontmatter，Obsidian/Dataview 自动反映
 
+## Vault 备份
+
+Vault 的 Git 自动提交是独立于 Compass API 的外置任务：它只记录 Obsidian 或 Compass 已写入的结果，不参与查询、索引、评分或恢复决策。安装步骤、白名单、每日任务和审计方式见 [`docs/VAULT_BACKUP.md`](docs/VAULT_BACKUP.md)。
+
+## 跨端同步
+
+跨端同步同样在 Compass 外部运行。Syncthing 是首选；冲突副本会保留、跳过索引并要求人工合并，随后由 Compass 从 Vault 重建本地索引。配置边界与验收步骤见 [`docs/VAULT_SYNC.md`](docs/VAULT_SYNC.md)。
+
 ## 目录结构
 
 ```

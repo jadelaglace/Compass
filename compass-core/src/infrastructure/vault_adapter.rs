@@ -6,8 +6,9 @@
 //! 注：文件锁为 advisory（独立 .lock 文件），只防 compass 自身并发写，
 //! 不防 Obsidian 等外部编辑器直接改 .md（外部编辑 last-write-wins）。
 
-use std::fmt;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -15,47 +16,151 @@ use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use serde_yaml::Value;
 
-use crate::models::{Freshness, Score};
+use crate::application::ports::{VaultIndexEntry, VaultPort, VaultScan};
+use crate::domain::entity::{Freshness, Score};
+pub(crate) use crate::domain::vault::{
+    MetadataPatch, MetadataPatchError, MetadataPatchResult, VaultNote as Note,
+};
 
-/// 一个笔记：frontmatter 原始文本 + 正文（closing `---` 之后）。
-pub struct Note {
-    pub frontmatter: String,
-    pub body: String,
+/// Filesystem implementation of the authoritative Vault port.
+pub(crate) struct VaultAdapter {
+    root: PathBuf,
 }
 
-/// Metadata changes that Phase 4 accept operations are allowed to apply.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum MetadataPatch {
-    AddTag(String),
-    AddLink(String),
-}
+impl VaultAdapter {
+    pub(crate) fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataPatchResult {
-    pub changed: bool,
-    pub content_hash: String,
-}
+    fn resolve(&self, file_path: &str) -> PathBuf {
+        self.root.join(file_path)
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MetadataPatchError {
-    Stale { expected: String, actual: String },
-}
-
-impl fmt::Display for MetadataPatchError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Stale { expected, actual } => {
-                write!(
-                    f,
-                    "content hash is stale: expected {expected}, actual {actual}"
-                )
-            }
+    fn scan_entry(&self, path: &Path) -> Result<Option<VaultIndexEntry>> {
+        if is_sync_conflict_path(path) {
+            return Ok(None);
         }
+        let note = read_note(path)?;
+        if has_unrendered_templater_marker(&note.frontmatter) {
+            return Ok(None);
+        }
+        let frontmatter: Value =
+            serde_yaml::from_str(&note.frontmatter).context("解析 frontmatter 失败")?;
+        let mapping = frontmatter
+            .as_mapping()
+            .ok_or_else(|| anyhow!("frontmatter 不是 mapping"))?;
+        let id = match mapping
+            .get(Value::String("id".into()))
+            .and_then(Value::as_str)
+        {
+            Some(value) => value.to_string(),
+            None => return Ok(None),
+        };
+        let scalar = |key: &str| {
+            mapping
+                .get(Value::String(key.into()))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        let score = get_score(&note.frontmatter)?;
+        Ok(Some(VaultIndexEntry {
+            id,
+            file_path: relative_path(&self.root, path),
+            title: scalar("title"),
+            layer: scalar("layer"),
+            status: scalar("status"),
+            score,
+            content_hash: Some(content_hash(&note.body)),
+            tags: extract_tags(&note.frontmatter),
+            links: extract_refs(&note.body),
+            body: note.body,
+        }))
+    }
+
+    fn is_template_path(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root)
+            .ok()
+            .into_iter()
+            .flat_map(|relative| relative.components())
+            .any(|component| component.as_os_str() == "Templates")
     }
 }
 
-impl std::error::Error for MetadataPatchError {}
+impl VaultPort for VaultAdapter {
+    fn load(&self, file_path: &str) -> Result<Note> {
+        read_note(&self.resolve(file_path))
+    }
+
+    fn read_raw(&self, file_path: &str) -> Result<String> {
+        let path = self.resolve(file_path);
+        fs::read_to_string(&path).with_context(|| format!("读取文件失败 {}", path.display()))
+    }
+
+    fn score(&self, note: &Note) -> Result<Option<Score>> {
+        get_score(&note.frontmatter)
+    }
+
+    fn freshness(&self, note: &Note) -> Result<Freshness> {
+        get_freshness(&note.frontmatter)
+    }
+
+    fn content_updated_at(&self, note: &Note) -> Result<Option<String>> {
+        content_updated_at(&note.frontmatter)
+    }
+
+    fn tags(&self, note: &Note) -> Vec<String> {
+        extract_tags(&note.frontmatter)
+    }
+
+    fn refs(&self, note: &Note) -> Vec<String> {
+        extract_refs(&note.body)
+    }
+
+    fn write_score(&self, file_path: &str, score: &Score) -> Result<()> {
+        write_score(&self.resolve(file_path), score)
+    }
+
+    fn patch_metadata(
+        &self,
+        file_path: &str,
+        expected_hash: &str,
+        patches: &[MetadataPatch],
+    ) -> Result<MetadataPatchResult> {
+        patch_metadata(&self.resolve(file_path), expected_hash, patches)
+    }
+
+    fn create(&self, file_path: &str, content: &str) -> Result<()> {
+        let path = self.resolve(file_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("创建 Vault 目录失败 {}", parent.display()))?;
+        }
+        fs::write(&path, content).with_context(|| format!("写入 Vault 文件失败 {}", path.display()))
+    }
+
+    fn index_entry(&self, file_path: &str) -> Result<Option<VaultIndexEntry>> {
+        let path = self.resolve(file_path);
+        if !path.exists() || self.is_template_path(&path) || is_sync_conflict_path(&path) {
+            return Ok(None);
+        }
+        self.scan_entry(&path)
+    }
+
+    fn scan(&self) -> Result<VaultScan> {
+        let mut scan = VaultScan::default();
+        for path in walk_markdown(&self.root)? {
+            match self.scan_entry(&path) {
+                Ok(Some(entry)) => scan.entries.push(entry),
+                Ok(None) => scan.skipped += 1,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), err = %error, "Vault note skipped during scan");
+                    scan.skipped += 1;
+                }
+            }
+        }
+        Ok(scan)
+    }
+}
 
 /// 读取 .md 文件，拆分 frontmatter 与正文。
 pub fn read_note(path: &Path) -> Result<Note> {
@@ -90,7 +195,7 @@ pub fn patch_metadata(
 
     let result = (|| -> Result<MetadataPatchResult> {
         let original = fs::read_to_string(path)?;
-        let actual_hash = crate::contracts::note_content_hash(&original)?;
+        let actual_hash = crate::domain::contracts::note_content_hash(&original)?;
         if actual_hash != expected_hash {
             return Err(MetadataPatchError::Stale {
                 expected: expected_hash.to_string(),
@@ -119,7 +224,7 @@ pub fn patch_metadata(
         for patch in patches {
             match patch {
                 MetadataPatch::AddTag(tag) => {
-                    let tag = crate::contracts::normalize_tag(tag)?;
+                    let tag = crate::domain::contracts::normalize_tag(tag)?;
                     let existing = extract_tags(&new_frontmatter);
                     if !existing
                         .iter()
@@ -175,7 +280,7 @@ pub fn patch_metadata(
             new_content
         };
         atomic_write(path, &new_content)?;
-        let content_hash = crate::contracts::note_content_hash(&new_content)?;
+        let content_hash = crate::domain::contracts::note_content_hash(&new_content)?;
         Ok(MetadataPatchResult {
             changed: true,
             content_hash,
@@ -417,10 +522,62 @@ pub fn extract_tags(frontmatter: &str) -> Vec<String> {
     result
 }
 
+fn content_hash(content: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Syncthing and the documented WebDAV workflow retain conflicts as separate
+/// Markdown files. They are evidence for manual resolution, never entities.
+pub(crate) fn is_sync_conflict_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name.contains(".sync-conflict-") || name.contains(".webdav-conflict-")
+}
+
+fn walk_markdown(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    walk_markdown_inner(root, &mut files)?;
+    Ok(files)
+}
+
+fn walk_markdown_inner(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            if name == "Templates" {
+                continue;
+            }
+            walk_markdown_inner(&path, files)?;
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("md")
+            && !is_sync_conflict_path(&path)
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Weights;
+    use crate::domain::entity::Weights;
     use std::fs;
     use tempfile::tempdir;
 
@@ -586,12 +743,23 @@ mod tests {
     }
 
     #[test]
+    fn sync_conflict_copies_are_identified_case_insensitively() {
+        assert!(is_sync_conflict_path(Path::new(
+            "Knowledge/note.sync-conflict-20260712-120000-DEVICE.md"
+        )));
+        assert!(is_sync_conflict_path(Path::new(
+            "Knowledge/note.WEBDAV-CONFLICT-20260712.md"
+        )));
+        assert!(!is_sync_conflict_path(Path::new("Knowledge/note.md")));
+    }
+
+    #[test]
     fn test_patch_metadata_preserves_bom_crlf_score_and_body() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("note.md");
         let original = format!("\u{feff}{}", sample_md().replace('\n', "\r\n"));
         fs::write(&path, &original).unwrap();
-        let expected = crate::contracts::note_content_hash(&original).unwrap();
+        let expected = crate::domain::contracts::note_content_hash(&original).unwrap();
 
         let result = patch_metadata(
             &path,
@@ -612,7 +780,7 @@ mod tests {
         assert!(after.contains("# Game Theory\r\n"));
         assert!(after.ends_with("[[know-000003]]\r\n"));
         assert_eq!(
-            crate::contracts::note_content_hash(&after).unwrap(),
+            crate::domain::contracts::note_content_hash(&after).unwrap(),
             result.content_hash
         );
     }
@@ -629,7 +797,7 @@ mod tests {
         assert!(error.downcast_ref::<MetadataPatchError>().is_some());
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
 
-        let expected = crate::contracts::note_content_hash(&original).unwrap();
+        let expected = crate::domain::contracts::note_content_hash(&original).unwrap();
         let first = patch_metadata(
             &path,
             &expected,
